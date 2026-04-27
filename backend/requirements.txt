@@ -1,0 +1,6 @@
+# Backend stub — this app is front-end only.
+# A minimal FastAPI app is kept here so supervisor's `backend` program
+# can stay healthy and to leave room for a future server (e.g. for a
+# real geocoder proxy or ephemeris micro-service).
+fastapi==0.115.0
+uvicorn[standard]==0.30.6

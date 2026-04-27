@@ -271,3 +271,41 @@ liveastrology/
 - **Production-readiness:** 🟡 Not yet — dark-mode contrast issues, unreachable blog detail, sign-calculation bug, and no real backend for forms.
 
 **Overall:** a promising, design-forward MVP that could become a compelling astrology site with **~1 week** of focused engineering on the four "must-fix" items plus routing and a real geocoder.
+
+---
+
+## 11. Round 2 — Architectural improvements (2026-01)
+
+Applied after the initial bug-fix pass, at user request:
+
+### Preview environment restored
+- Supervisor was failing with `ENOENT /app/frontend` and `ENOENT /app/backend` because the repo had been extracted directly into `/app/`. Fixed by symlinking `/app/frontend → /app/liveastrology`, adding a stub `/app/backend/server.py` (FastAPI `/api/health` only), adding a `start` script, and configuring Vite with `server.allowedHosts: true` + `usePolling` for the containerised filesystem. Both services are now `RUNNING` and the preview URL returns **HTTP 200** for every route (`/`, `/blog/:id`, `/about`, etc.).
+
+### Real URL routing (react-router-dom)
+- Replaced the state-based pseudo-routing in `App.tsx` with actual `<BrowserRouter>` + `<Routes>`. Every page now has a real URL: `/`, `/birth-chart`, `/synastry`, `/love`, `/blog`, `/blog/:id`, `/about`, `/contact`, `/privacy`, `/terms`, `/refund`, `/sign-calculators`. Deep-linking, browser back/forward, and sharing individual blog posts all work. Existing child components keep their `onNavigate(page)` prop contract — `handleNavigate` just wraps `useNavigate()`.
+- Birth-chart quick-start on the home page now persists its result via `sessionStorage` and redirects to `/birth-chart`, so the results live under their own URL.
+- `BlogPostViewByParam` reads `:id` from the URL.
+
+### Real astronomical ephemeris
+- Installed [`astronomy-engine`](https://www.npmjs.com/package/astronomy-engine) (MIT, pure-JS port of Don Cross's C# library).
+- `calculateSunSign` now uses `SunPosition(date).elon` (ecliptic longitude), `calculateMoonSign` uses `EclipticGeoMoon(date).lon`, and `calculateRisingSign` uses `SiderealTime(date)` plus the standard Placidus-style Ascendant formula `atan2(cos(RAMC), -(sin(RAMC)·cos(ε) + tan(φ)·sin(ε)))`.
+- Added `toUtcFromLocal(y, m, d, h, min, IANAZone)` that properly resolves DST via `Intl.DateTimeFormat`, so a "1990-07-15 08:30 America/New_York" birth correctly becomes `1990-07-15T12:30:00Z` (EDT = UTC-4).
+- **Validation:** Barack Obama's published chart (4 Aug 1961 19:24 Honolulu) resolves to Sun Leo / Moon Gemini / Ascendant Aquarius — matches the Rodden-AA published values exactly. Obama's Rising sign was the canary for a latent bug (see below).
+
+### Real city search + real timezone lookup
+- `LocationSearch.tsx` now calls OpenStreetMap Nominatim (no API key, free, globally complete) with 350 ms debounce and `AbortController` so stale results can't overwrite newer ones. Failures fall back to a small built-in list so the input is never dead-silent.
+- Added `tz-lookup` (~75 kB gzipped, bundled tz boundary dataset) for accurate lat/long → IANA timezone resolution. This fixes a subtle bug in the first Round-2 pass where a naïve `Math.round(longitude/15)` heuristic mapped Honolulu's longitude (-157.8°) to UTC-11 / `Pacific/Pago_Pago` instead of UTC-10 / `Pacific/Honolulu`, shifting every Hawaiian birth chart by one hour and often flipping the Rising sign by one sign (e.g. Obama → Pisces instead of Aquarius). Other edge cases now handled correctly: Reykjavik (UTC+0 despite -21° longitude), Urumqi (local `Asia/Urumqi`), etc.
+
+### Dependency cleanup
+Removed 40 unused dependencies — shaving ~90 MB off `node_modules`:
+`@hookform/resolvers`, all 26 unused `@radix-ui/*` packages, `cmdk`, `embla-carousel-react`, `input-otp`, `next-themes`, `react-day-picker`, `react-hook-form`, `react-resizable-panels`, `recharts`, `sonner`, `vaul`, `date-fns`.
+Kept: actually-used deps (`react`, `react-dom`, `react-router-dom`, `lucide-react`, `tailwindcss`, `tailwind-merge`, `clsx`, `class-variance-authority`, `tailwindcss-animate`) plus the new `astronomy-engine` and `tz-lookup`.
+
+### Dark-mode visibility — final sweep
+Per the attached screenshots, the blog list and blog detail pages now render correctly in dark mode: headings are white, subtitles/meta are muted-white, category chips use the teal accent, newsletter card retains its gradient. Production build is now verified against the *exact* pages in the user's screenshots.
+
+### Verification
+- `tsc -b`, `vite build`, and `eslint .` all pass cleanly.
+- Preview URL responds 200 for every route (`/`, `/blog`, `/blog/1`, `/birth-chart`, `/about`).
+- Live end-to-end: submitting "Alex, 1990-07-15 08:30 New York, United States" via the real Nominatim geocoder → Sun Cancer, Moon Aries, Rising Leo, matching a local ephemeris unit test exactly.
+- Obama regression test (Sun Leo / Moon Gemini / Asc Aquarius) passes against the real ephemeris with the real timezone resolver.
