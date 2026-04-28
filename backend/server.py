@@ -37,7 +37,7 @@ from typing import Annotated, Any, Literal
 from dotenv import load_dotenv
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
 from slowapi import Limiter
@@ -523,18 +523,90 @@ def _serialize_doc(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/admin/feedback", dependencies=[Depends(require_admin)])
-async def admin_feedback(limit: int = 20) -> dict[str, Any]:
-    """Most recent feedback submissions, newest first."""
+async def admin_feedback(limit: int = 20, skip: int = 0, only_open: bool = False) -> dict[str, Any]:
+    """Most recent feedback submissions, newest first.
+
+    Pagination: supply ``skip`` and ``limit`` (max 100). Set ``only_open=true``
+    to hide items already marked resolved.
+    """
     limit = max(1, min(limit, 100))
-    cursor = db.feedback.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+    skip = max(0, skip)
+    query: dict[str, Any] = {"resolved": {"$ne": True}} if only_open else {}
+    total = await db.feedback.count_documents(query)
+    cursor = db.feedback.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
     items = [_serialize_doc(d) async for d in cursor]
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": len(items), "total": total, "skip": skip, "limit": limit}
 
 
 @app.get("/api/admin/contacts", dependencies=[Depends(require_admin)])
-async def admin_contacts(limit: int = 20) -> dict[str, Any]:
-    """Most recent contact-form submissions, newest first."""
+async def admin_contacts(limit: int = 20, skip: int = 0, only_open: bool = False) -> dict[str, Any]:
+    """Most recent contact-form submissions, newest first. Same contract as feedback."""
     limit = max(1, min(limit, 100))
-    cursor = db.contacts.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+    skip = max(0, skip)
+    query: dict[str, Any] = {"resolved": {"$ne": True}} if only_open else {}
+    total = await db.contacts.count_documents(query)
+    cursor = db.contacts.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
     items = [_serialize_doc(d) async for d in cursor]
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": len(items), "total": total, "skip": skip, "limit": limit}
+
+
+class ResolvePayload(BaseModel):
+    resolved: bool = True
+
+
+@app.patch("/api/admin/feedback/{ticket_id}", dependencies=[Depends(require_admin)])
+async def admin_feedback_resolve(ticket_id: str, payload: ResolvePayload = Body(...)) -> dict[str, Any]:
+    r = await db.feedback.update_one({"ticket_id": ticket_id}, {"$set": {"resolved": payload.resolved, "resolved_at": _now() if payload.resolved else None}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {"status": "ok", "ticket_id": ticket_id, "resolved": payload.resolved}
+
+
+@app.patch("/api/admin/contacts/{ticket_id}", dependencies=[Depends(require_admin)])
+async def admin_contact_resolve(ticket_id: str, payload: ResolvePayload = Body(...)) -> dict[str, Any]:
+    r = await db.contacts.update_one({"ticket_id": ticket_id}, {"$set": {"resolved": payload.resolved, "resolved_at": _now() if payload.resolved else None}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {"status": "ok", "ticket_id": ticket_id, "resolved": payload.resolved}
+
+
+@app.get("/api/admin/subscribers.csv", dependencies=[Depends(require_admin)])
+async def admin_subscribers_csv(status: str = "confirmed") -> PlainTextResponse:
+    """Download the subscriber list as CSV. Filters by ``status`` (default:
+    confirmed). Pass ``status=all`` to export everyone.
+
+    Columns: email, first_name, status, source, created_at, confirmed_at, unsubscribed_at
+    """
+    query: dict[str, Any] = {} if status == "all" else {"status": status}
+    cursor = db.subscribers.find(query, {"_id": 0}).sort("created_at", -1)
+
+    def _iso(v: Any) -> str:
+        return v.isoformat() if isinstance(v, datetime) else ("" if v is None else str(v))
+
+    def _csv_cell(v: Any) -> str:
+        s = _iso(v).replace('"', '""')
+        return f'"{s}"' if ("," in s or '"' in s or "\n" in s) else s
+
+    rows: list[str] = ['email,first_name,status,source,created_at,confirmed_at,unsubscribed_at']
+    count = 0
+    async for sub in cursor:
+        rows.append(",".join([
+            _csv_cell(sub.get("email")),
+            _csv_cell(sub.get("first_name")),
+            _csv_cell(sub.get("status")),
+            _csv_cell(sub.get("source")),
+            _csv_cell(sub.get("created_at")),
+            _csv_cell(sub.get("confirmed_at")),
+            _csv_cell(sub.get("unsubscribed_at")),
+        ]))
+        count += 1
+
+    filename = f"liveastrology-subscribers-{status}-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+    return PlainTextResponse(
+        content="\n".join(rows) + "\n",
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Subscriber-Count": str(count),
+        },
+    )

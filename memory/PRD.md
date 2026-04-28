@@ -85,6 +85,21 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2e · Houses + Aspects, Admin CSV, mark-resolved, pagination
+- ✅ **Houses + Aspects** (frontend-only, uses existing `astronomy-engine` JS build):
+  - New `calculateRisingDegree()` + `calculateHousesAndAspects()` in `src/lib/astrology.ts`.
+  - **Whole-sign house system** (Ascendant's sign = House 1; each house exactly one zodiac sign). Chosen over Placidus for polar-latitude safety + simplicity.
+  - **5 major aspects** (conjunction, sextile, square, trine, opposition) with astrologically-standard orbs (8°/4°/6°/8°/8°).
+  - `AstrologyResult` type extended with `houses`, `planets`, `aspects`.
+  - New `HousesAndAspects.tsx` component — 3 sections: planetary positions, 12 houses with themes + activated-planet badges, aspects with glyphs + orb + harmonious/challenging colour-coding.
+  - Live-tested with Ada Lovelace's birth data (1990-06-15 14:30 London): 5 planets + 12 houses + Moon sextile Venus aspect all rendered correctly.
+- ✅ **Admin subscribers CSV export** — `GET /api/admin/subscribers.csv?status=confirmed|all` returns `text/csv` with `Content-Disposition: attachment` + `X-Subscriber-Count` header. "Download subscribers CSV" button in the admin actions panel, produces a dated filename.
+- ✅ **Admin mark-resolved** — `PATCH /api/admin/{feedback,contacts}/{ticket_id}` toggles a `resolved` boolean. Queue items show a line-through title + "resolved" badge when closed; **per-item "Mark resolved" button** flips state in one click. Live-verified on preview.
+- ✅ **Admin queue pagination + "show open only" toggle** — both `GET /api/admin/feedback` and `/contacts` now accept `skip`, `limit` (max 100), and `only_open=true`. Response includes `total` + `skip` + `limit` for client pagination. Frontend ships a "Show open only" checkbox above each queue.
+- ✅ **i18n extended to static pages** — Terms / Privacy / About / Refund titles & intros added as keys in all 3 locales (`en` / `es` / `hi`). JSON infra is ready; pages that want to adopt these keys just need a `useTranslation()` import and `{t('pages.privacy.title')}`.
+- ✅ **`/app/docs/DEPLOYMENT.md`** — comprehensive production cutover guide covering: Resend domain verification (SPF/DKIM/DMARC records), GitHub push via "Save to GitHub", Turnstile key rotation, admin-secret rotation, Redis swap path for multi-replica, external-cron recipe (GitHub Actions) to replace the in-process scheduler, observability recommendations (Sentry, Plausible).
+- ✅ Test suite grew to **24 tests** (was 19): added `test_mark_feedback_resolved`, `test_mark_feedback_resolved_404`, `test_subscribers_csv_export`, `test_subscribers_csv_requires_auth`, `test_feedback_pagination`. All passing.
+
 ### 2026-02-14 · Session 2d · Cloudflare Turnstile + admin triage queues
 - ✅ **Cloudflare Turnstile** on all 4 public forms (subscribe / feedback / contact / blog-newsletter):
   - New `<Turnstile>` component with lazy script loading, explicit-render mode, and imperative `reset()` / `getToken()` via `useImperativeHandle`.
@@ -180,14 +195,17 @@ never surface to the user (the API always responds 202).
 - ✅ Frontend forms wired to backend.
 
 ### P1 — Next
-- Houses + aspects calculators (backend model + frontend display).
 - Verify `liveastrology.app` domain in Resend → swap `SENDER_EMAIL` in `.env` → production delivery unlocked.
-- Extend i18n to remaining pages (Terms, Privacy, About, Refund, Blog posts) — JSON infra is ready; it's just wiring.
+  **See `/app/docs/DEPLOYMENT.md` section 1 for the exact DNS records to add.**
+- Wire static pages (Terms / Privacy / About / Refund) to the new `pages.*` i18n keys.
+- Outer-planet support in Houses + Aspects (Jupiter, Saturn — astronomy-engine already provides them).
 
 ### P2 — Backlog
-- Redis-backed slowapi for multi-replica rate limiting (current: single-pod in-memory).
-- Admin queue "mark as resolved" flag + pagination beyond the 20-item slice.
-- Weekly-brief editorial layer: human narrative on top of the ephemeris-derived transits.
+- Placidus house system option (requires polar-latitude edge-case handling).
+- Declinational aspects (parallel / contraparallel).
+- Admin dashboard "edit subscriber" (change status manually) + "send test email" helper.
+- Redis-backed slowapi for multi-replica rate limiting (single-pod is fine for now).
+- External GitHub-Actions cron replacing the in-process scheduler (`docs/DEPLOYMENT.md` §6).
 
 ## Test credentials
 

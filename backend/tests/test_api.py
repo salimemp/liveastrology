@@ -294,3 +294,89 @@ async def test_turnstile_rejects_when_enabled(client, monkeypatch):
     # Good token
     r = await ac.post("/api/subscribe", json={"email": "captcha-ok@example.com", "cf_turnstile_token": "good-token"})
     assert r.status_code == 202
+
+
+async def test_mark_feedback_resolved(client):
+    """PATCH /api/admin/feedback/{id} toggles the resolved flag."""
+    ac, db = client
+    await ac.post("/api/feedback", json={"category": "bug", "message": "Something is broken here"})
+    fb = await db.feedback.find_one({}, {"_id": 0})
+    tid = fb["ticket_id"]
+
+    r = await ac.patch(
+        f"/api/admin/feedback/{tid}",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"resolved": True},
+    )
+    assert r.status_code == 200
+    assert r.json()["resolved"] is True
+
+    # only_open filter now excludes it
+    r2 = await ac.get("/api/admin/feedback?only_open=true", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r2.status_code == 200
+    assert all(i["ticket_id"] != tid for i in r2.json()["items"])
+
+    # Un-resolve
+    r3 = await ac.patch(
+        f"/api/admin/feedback/{tid}",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"resolved": False},
+    )
+    assert r3.json()["resolved"] is False
+
+
+async def test_mark_feedback_resolved_404(client):
+    ac, _ = client
+    r = await ac.patch(
+        "/api/admin/feedback/NOPE-123",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"resolved": True},
+    )
+    assert r.status_code == 404
+
+
+async def test_subscribers_csv_export(client):
+    """CSV export returns one row per matching subscriber + a header row."""
+    ac, db = client
+    # Seed two confirmed, one pending
+    for i in range(2):
+        await ac.post("/api/subscribe", json={"email": f"confirmed{i}@example.com", "first_name": f"C{i}"})
+        sub = await db.subscribers.find_one({"email": f"confirmed{i}@example.com"}, {"_id": 0})
+        await ac.get(f"/api/subscribe/confirm?token={sub['confirm_token']}", follow_redirects=False)
+    await ac.post("/api/subscribe", json={"email": "pending@example.com"})
+
+    r = await ac.get("/api/admin/subscribers.csv?status=confirmed", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "filename=" in r.headers["content-disposition"]
+    body = r.text
+    # 1 header + 2 data rows
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    assert lines[0].startswith("email,first_name,status")
+    assert len(lines) == 3
+    assert "confirmed0@example.com" in body
+    assert "pending@example.com" not in body
+
+    # status=all includes the pending one
+    r2 = await ac.get("/api/admin/subscribers.csv?status=all", headers={"Authorization": "Bearer test-admin-secret"})
+    lines2 = [ln for ln in r2.text.splitlines() if ln.strip()]
+    assert len(lines2) == 4
+
+
+async def test_subscribers_csv_requires_auth(client):
+    ac, _ = client
+    r = await ac.get("/api/admin/subscribers.csv")
+    assert r.status_code == 401
+
+
+async def test_feedback_pagination(client):
+    ac, _ = client
+    for i in range(5):
+        await ac.post("/api/feedback", json={"category": "general", "message": f"Pagination test message {i}"})
+    r = await ac.get("/api/admin/feedback?limit=2&skip=0", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    assert body["total"] == 5
+    assert body["limit"] == 2
+    assert body["skip"] == 0
