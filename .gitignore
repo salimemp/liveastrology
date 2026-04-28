@@ -23,11 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 -e 
-# Environment and credential files
-.env
-.env.*
-*.env
+# Credential files (.env files are intentionally tracked for Emergent native deployment)
 credentials.json
 *.pem
 *.key
 .credentials
+
+# Internal credential notes — never commit
+memory/test_credentials.md
