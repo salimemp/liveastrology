@@ -27,8 +27,6 @@ Endpoints (all prefixed with /api):
        body: { name, email, subject, message }
        sends template 05 (ack) + template 07 (admin)
 """
-from __future__ import annotations
-
 import logging
 import os
 import secrets
@@ -37,13 +35,17 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 import email_service
+import scheduler as scheduler_module
 
 load_dotenv()
 
@@ -55,13 +57,38 @@ APP_ORIGIN    = os.environ.get("APP_ORIGIN", "https://liveastrology.app").rstrip
 NOTIFY_EMAIL  = os.environ.get("NOTIFY_EMAIL", "notify@liveastrology.app")
 MONGO_URL     = os.environ["MONGO_URL"]
 DB_NAME       = os.environ["DB_NAME"]
+ADMIN_SECRET  = os.environ.get("ADMIN_SECRET", "")
 
 # ---------- DB ----------
 _mongo = AsyncIOMotorClient(MONGO_URL)
 db = _mongo[DB_NAME]
 
+# ---------- Rate limiter ----------
+# IP-based, in-memory. Ingress may strip the real client IP — the limiter
+# falls back to X-Forwarded-For via _client_ip. Fine for single-pod MVP;
+# for multi-replica deployments swap storage_uri for Redis.
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_client_ip, default_limits=["120/minute"])
+
 # ---------- App ----------
 app = FastAPI(title="Live Astrology backend", version="1.0.0")
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests — please slow down and try again in a minute."},
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -69,6 +96,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    if os.environ.get("ENABLE_SCHEDULER", "1") == "1":
+        scheduler_module.start_scheduler(db)
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    scheduler_module.stop_scheduler()
+
+
+def require_admin(authorization: str = Header(default="")) -> None:
+    """Shared-secret bearer auth for admin-only endpoints."""
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="ADMIN_SECRET is not configured")
+    expected = f"Bearer {ADMIN_SECRET}"
+    if authorization != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ---------- Utilities ----------
@@ -170,7 +217,8 @@ async def health() -> dict[str, Any]:
 
 
 @app.post("/api/subscribe", status_code=status.HTTP_202_ACCEPTED)
-async def subscribe(payload: SubscribeIn, request: Request) -> dict[str, Any]:
+@limiter.limit("5/minute")
+async def subscribe(request: Request, payload: SubscribeIn = Body(...)) -> dict[str, Any]:
     email = payload.email.lower()
     first_name = _first_name(payload.first_name, email)
     confirm_token = _token()
@@ -297,7 +345,8 @@ async def unsubscribe(request: Request, token: str | None = None, email: str | N
 
 
 @app.post("/api/feedback", status_code=status.HTTP_202_ACCEPTED)
-async def feedback(payload: FeedbackIn, request: Request) -> dict[str, Any]:
+@limiter.limit("3/minute")
+async def feedback(request: Request, payload: FeedbackIn = Body(...)) -> dict[str, Any]:
     ticket_id = _short_id("FB")
     first_name = _first_name(payload.name, payload.email)
     category_labels = {
@@ -369,7 +418,8 @@ async def feedback(payload: FeedbackIn, request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/contact", status_code=status.HTTP_202_ACCEPTED)
-async def contact(payload: ContactIn, request: Request) -> dict[str, Any]:
+@limiter.limit("3/minute")
+async def contact(request: Request, payload: ContactIn = Body(...)) -> dict[str, Any]:
     ticket_id = _short_id("CT")
     first_name = _first_name(payload.name, payload.email)
     received_at = _now().strftime("%Y-%m-%d %H:%M UTC")
@@ -420,3 +470,34 @@ async def contact(payload: ContactIn, request: Request) -> dict[str, Any]:
     )
 
     return {"status": "ok", "ticket_id": ticket_id, "message": "Thanks! We'll reply within 2 business days."}
+
+
+# ---------- Admin endpoints ----------
+@app.post("/api/admin/dispatch-weekly", dependencies=[Depends(require_admin)])
+async def admin_dispatch_weekly() -> dict[str, Any]:
+    """Manually trigger the weekly horoscope send. Safe for external cron."""
+    result = await scheduler_module.dispatch_weekly_horoscope(db)
+    return result
+
+
+@app.get("/api/admin/stats", dependencies=[Depends(require_admin)])
+async def admin_stats() -> dict[str, Any]:
+    subscribers_total   = await db.subscribers.count_documents({})
+    subscribers_pending = await db.subscribers.count_documents({"status": "pending"})
+    subscribers_active  = await db.subscribers.count_documents({"status": "confirmed"})
+    subscribers_unsub   = await db.subscribers.count_documents({"status": "unsubscribed"})
+    feedback_total      = await db.feedback.count_documents({})
+    contacts_total      = await db.contacts.count_documents({})
+    dispatches_total    = await db.weekly_dispatches.count_documents({})
+    return {
+        "subscribers": {
+            "total": subscribers_total,
+            "pending": subscribers_pending,
+            "confirmed": subscribers_active,
+            "unsubscribed": subscribers_unsub,
+        },
+        "feedback_total": feedback_total,
+        "contacts_total": contacts_total,
+        "weekly_dispatches_total": dispatches_total,
+    }
+

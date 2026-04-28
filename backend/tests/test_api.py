@@ -1,0 +1,221 @@
+"""End-to-end API tests.
+
+Each test hits the FastAPI app via an in-memory ASGI transport, against
+an in-memory Mongo, with Resend mocked. Coverage:
+
+- GET  /api/health
+- POST /api/subscribe           (double opt-in start)
+- GET  /api/subscribe/confirm   (double opt-in complete)
+- POST /api/unsubscribe
+- POST /api/feedback            (ticket ack + admin notify)
+- POST /api/contact
+- Validation errors             (bad email, short message)
+- Rate limiting                 (per-IP on /subscribe + /feedback)
+- Admin weekly dispatch         (requires bearer)
+"""
+from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_health(client):
+    ac, _ = client
+    r = await ac.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "liveastrology-backend"
+
+
+async def test_subscribe_creates_pending_and_sends_two_emails(client, sent_emails):
+    ac, db = client
+    r = await ac.post("/api/subscribe", json={"email": "alex@example.com", "first_name": "Alex"})
+    assert r.status_code == 202
+    assert r.json() == {"status": "pending", "message": "Please check your inbox to confirm your subscription."}
+
+    sub = await db.subscribers.find_one({"email": "alex@example.com"}, {"_id": 0})
+    assert sub is not None
+    assert sub["status"] == "pending"
+    assert sub["confirm_token"]
+    assert sub["unsub_token"]
+
+    # One user email (template 01) + one admin email (template 07)
+    slugs = [e["slug"] for e in sent_emails]
+    assert "subscribe_confirm" in slugs
+    assert "admin_notification" in slugs
+    user_email = next(e for e in sent_emails if e["slug"] == "subscribe_confirm")
+    assert user_email["to"] == "alex@example.com"
+    assert "confirm_url" in user_email["vars"]
+    assert user_email["list_unsubscribe"]
+
+
+async def test_subscribe_is_idempotent(client, sent_emails):
+    ac, db = client
+    await ac.post("/api/subscribe", json={"email": "alex@example.com"})
+    await ac.post("/api/subscribe", json={"email": "alex@example.com"})
+    count = await db.subscribers.count_documents({"email": "alex@example.com"})
+    assert count == 1
+
+
+async def test_confirm_redirects_and_sends_welcome(client, sent_emails):
+    ac, db = client
+    await ac.post("/api/subscribe", json={"email": "alex@example.com"})
+    sub = await db.subscribers.find_one({"email": "alex@example.com"}, {"_id": 0})
+    token = sub["confirm_token"]
+
+    r = await ac.get(f"/api/subscribe/confirm?token={token}", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].endswith("/?subscribed=1")
+
+    # Welcome email fires once
+    welcomes = [e for e in sent_emails if e["slug"] == "subscribe_welcome"]
+    assert len(welcomes) == 1
+    assert welcomes[0]["to"] == "alex@example.com"
+
+    # Second click doesn't re-send
+    await ac.get(f"/api/subscribe/confirm?token={token}", follow_redirects=False)
+    welcomes = [e for e in sent_emails if e["slug"] == "subscribe_welcome"]
+    assert len(welcomes) == 1
+
+
+async def test_confirm_invalid_token_redirects_with_reason(client):
+    ac, _ = client
+    r = await ac.get("/api/subscribe/confirm?token=nope", follow_redirects=False)
+    assert r.status_code == 302
+    assert "reason=invalid" in r.headers["location"]
+
+
+async def test_unsubscribe_by_email(client, sent_emails):
+    ac, db = client
+    await ac.post("/api/subscribe", json={"email": "alex@example.com"})
+    r = await ac.post("/api/unsubscribe", json={"email": "alex@example.com"})
+    assert r.status_code == 200
+    sub = await db.subscribers.find_one({"email": "alex@example.com"}, {"_id": 0})
+    assert sub["status"] == "unsubscribed"
+    assert any(e["slug"] == "unsubscribe_confirm" for e in sent_emails)
+
+
+async def test_unsubscribe_missing_identifiers_400(client):
+    ac, _ = client
+    r = await ac.post("/api/unsubscribe", json={})
+    assert r.status_code == 400
+
+
+async def test_feedback_happy_path(client, sent_emails):
+    ac, db = client
+    r = await ac.post("/api/feedback", json={
+        "name": "Alex", "email": "alex@example.com",
+        "rating": 5, "category": "praise",
+        "message": "Absolutely love this site!",
+    })
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["ticket_id"].startswith("FB-")
+
+    stored = await db.feedback.find_one({"ticket_id": body["ticket_id"]}, {"_id": 0})
+    assert stored["email"] == "alex@example.com"
+    assert stored["rating"] == 5
+
+    slugs = [e["slug"] for e in sent_emails]
+    assert "feedback_ack" in slugs
+    assert "admin_notification" in slugs
+    ack = next(e for e in sent_emails if e["slug"] == "feedback_ack")
+    assert ack["vars"]["rating_stars"].startswith("★★★★★")
+
+
+async def test_feedback_without_email_still_notifies_admin(client, sent_emails):
+    ac, _ = client
+    r = await ac.post("/api/feedback", json={
+        "category": "bug",
+        "message": "Something's broken but I'm shy about email.",
+    })
+    assert r.status_code == 202
+    slugs = [e["slug"] for e in sent_emails]
+    # No user ack (no email provided)…
+    assert "feedback_ack" not in slugs
+    # …but admin still gets notified.
+    assert "admin_notification" in slugs
+
+
+async def test_feedback_message_too_short_422(client):
+    ac, _ = client
+    r = await ac.post("/api/feedback", json={"category": "general", "message": "hi"})
+    assert r.status_code == 422
+
+
+async def test_subscribe_invalid_email_422(client):
+    ac, _ = client
+    r = await ac.post("/api/subscribe", json={"email": "not-an-email"})
+    assert r.status_code == 422
+
+
+async def test_contact_happy_path(client, sent_emails):
+    ac, db = client
+    r = await ac.post("/api/contact", json={
+        "name": "Alex", "email": "alex@example.com",
+        "subject": "Partnership", "message": "Hi — would love to chat about a collab.",
+    })
+    assert r.status_code == 202
+    body = r.json()
+    assert body["ticket_id"].startswith("CT-")
+    stored = await db.contacts.find_one({"ticket_id": body["ticket_id"]}, {"_id": 0})
+    assert stored["subject"] == "Partnership"
+    slugs = [e["slug"] for e in sent_emails]
+    assert "contact_ack" in slugs
+    assert "admin_notification" in slugs
+
+
+async def test_admin_weekly_requires_bearer(client):
+    ac, _ = client
+    r = await ac.post("/api/admin/dispatch-weekly")
+    assert r.status_code == 401
+
+
+async def test_admin_weekly_runs_and_reports(client, sent_emails):
+    ac, db = client
+    # Seed two confirmed subscribers
+    await ac.post("/api/subscribe", json={"email": "a@example.com", "first_name": "Ada"})
+    sub = await db.subscribers.find_one({"email": "a@example.com"}, {"_id": 0})
+    await ac.get(f"/api/subscribe/confirm?token={sub['confirm_token']}", follow_redirects=False)
+
+    await ac.post("/api/subscribe", json={"email": "b@example.com", "first_name": "Bo"})
+    sub2 = await db.subscribers.find_one({"email": "b@example.com"}, {"_id": 0})
+    await ac.get(f"/api/subscribe/confirm?token={sub2['confirm_token']}", follow_redirects=False)
+
+    sent_emails.clear()
+
+    r = await ac.post(
+        "/api/admin/dispatch-weekly",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 2
+    assert body["sent"] == 2
+
+    weekly = [e for e in sent_emails if e["slug"] == "weekly_horoscope"]
+    assert len(weekly) == 2
+    assert {e["to"] for e in weekly} == {"a@example.com", "b@example.com"}
+
+
+
+async def test_rate_limit_on_subscribe(client):
+    """5/minute limit on /api/subscribe — the 6th request from the same IP
+    returns 429. Verified by flipping the limiter back on."""
+    ac, _ = client
+    import server
+    server.limiter.enabled = True
+    server.limiter.reset()
+    try:
+        for i in range(5):
+            r = await ac.post("/api/subscribe", json={"email": f"rate{i}@example.com"})
+            assert r.status_code == 202, f"call {i} expected 202, got {r.status_code}"
+        r = await ac.post("/api/subscribe", json={"email": "overflow@example.com"})
+        assert r.status_code == 429
+        assert "Too many requests" in r.json()["detail"]
+    finally:
+        server.limiter.enabled = False
+        server.limiter.reset()

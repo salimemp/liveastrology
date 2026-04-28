@@ -85,6 +85,19 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2b · Scheduler, rate limits, i18n, tests, preview CLI
+- ✅ **i18n Phase 0**: `react-i18next` + `i18next-browser-languagedetector` installed; `/src/i18n/index.ts` init module; `/src/i18n/locales/en.json` baseline JSON; language detection with localStorage cache under key `liveastrology:lang`; `<LanguageSwitcher>` component (auto-hides while only one locale registered); nav links + hero title + hero subtitle + CTA + FAQ heading migrated to `useTranslation()`.
+- ✅ **Weekly horoscope cron**:
+  - `/app/backend/content_generator.py` — deterministic weekly-vars builder (Sun sign lookup, rotating top-3 signs, 6 canned rituals, ISO-week stable content).
+  - `/app/backend/scheduler.py` — APScheduler cron running **every Sunday 18:00 UTC** + manual trigger.
+  - `POST /api/admin/dispatch-weekly` + `GET /api/admin/stats` (both Bearer-protected).
+  - Dispatch history recorded in `db.weekly_dispatches`.
+- ✅ **Pytest suite** at `/app/backend/tests/`: 15 tests covering health, subscribe → confirm → welcome, unsubscribe, feedback (with/without email), contact, validation (422), admin auth (401/200), admin weekly dispatch fan-out, and rate-limit enforcement (429 on 6th rapid subscribe). Uses `mongomock-motor` + patched `email_service.send_template` so no Resend or Mongo call leaks into CI.
+- ✅ **Per-IP rate limiting** via slowapi: 5/min on `/api/subscribe`, 3/min on `/api/feedback` & `/api/contact`, 120/min global fallback. Custom 429 JSON response. Live-verified on preview: 5 × 202 then 6th → 429.
+- ✅ **Email preview CLI** (`python -m preview_emails <slug> [output.html]`) — renders any of the 7 templates with realistic sample vars (weekly_horoscope uses the real generator); writes HTML + TXT side-by-side for browser QA. `--list` enumerates available slugs.
+- ✅ Fixed slowapi + `from __future__ import annotations` collision (removed the future import + explicit `Body(...)` declarations).
+- ✅ `/app/memory/test_credentials.md` populated with admin Bearer secret.
+
 ### 2026-02-14 · Session 2 · Transactional email backend + Resend
 - ✅ Finished email templates 06 (Weekly Horoscope) and 07 (Admin Notification)
 - ✅ Added plain-text fallbacks for all 7 templates (`/app/liveastrology/emails/txt/`)
@@ -134,19 +147,17 @@ never surface to the user (the API always responds 202).
 - ✅ Frontend forms wired to backend.
 
 ### P1 — Next
-- Multi-language support (Phase 0): `react-i18next` + English baseline JSON.
-- Weekly horoscope cron: generate content with current transits,
-  send template 06 to all confirmed subscribers.
-- Verify `liveastrology.app` domain in Resend → enable production sends.
-- Backend test suite at `/app/backend/tests/` (pytest + AsyncClient).
+- Extend i18n beyond Phase 0: migrate remaining strings (feedback form, footer, blog, terms/privacy), add Spanish + Hindi locales.
+- Real ephemeris content inside `content_generator.build_weekly_vars` (replace canned vars with `skyfield`-derived transits).
+- Verify `liveastrology.app` domain in Resend → swap SENDER_EMAIL → production delivery.
+- Wire `LanguageSwitcher` into the navbar/footer once a 2nd locale ships.
 
 ### P2 — Backlog
 - Houses + aspects calculators.
-- `/contact` page with form (endpoint already live at `/api/contact`).
-- Admin dashboard (view subscribers, feedback queue, opt-in funnel).
-- Abuse protection: per-IP rate limiting on `/api/subscribe` & `/api/feedback`.
-- Expand Resend-rendering to an offline preview CLI
-  (`python -m backend.preview_emails <slug>` → opens browser).
+- `/contact` page frontend (endpoint already live at `/api/contact`).
+- Redis-backed rate limiter for multi-replica deployments.
+- Admin dashboard UI (view subscribers, feedback queue, opt-in funnel).
+- Abuse protection beyond rate limits: Cloudflare Turnstile on `/api/subscribe` + `/api/feedback`.
 
 ## Test credentials
 
