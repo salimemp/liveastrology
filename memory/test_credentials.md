@@ -11,7 +11,7 @@ read from `ADMIN_SECRET` in `/app/backend/.env`:
 Example:
 
     curl -H "Authorization: Bearer change-me-to-a-long-random-string-before-shipping" \
-         https://transactional-mail-1.preview.emergentagent.com/api/admin/stats
+         https://cosmic-admin-live.preview.emergentagent.com/api/admin/stats
 
 **Before going live**, update `ADMIN_SECRET` in `/app/backend/.env` to a long
 random value (`openssl rand -hex 32`) and restart the backend.
