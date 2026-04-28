@@ -1,6 +1,7 @@
-# Backend stub — this app is front-end only.
-# A minimal FastAPI app is kept here so supervisor's `backend` program
-# can stay healthy and to leave room for a future server (e.g. for a
-# real geocoder proxy or ephemeris micro-service).
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+resend>=2.0.0
+motor>=3.3.0
+pydantic[email]>=2.5.0
+jinja2>=3.1.0
+python-dotenv>=1.0.0
