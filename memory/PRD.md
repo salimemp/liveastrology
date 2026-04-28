@@ -85,6 +85,16 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-04-28 · Session 2g · Resend webhooks + Email Health dashboard + production cutover
+- ✅ **`POST /api/webhooks/resend`** — ingests Resend deliverability events (`email.sent` / `delivered` / `bounced` / `opened` / `clicked` / `complained` / `delivery_delayed`), verifies Svix signature when `RESEND_WEBHOOK_SECRET` is set, and persists each event in `db.email_events` for full auditability. When the secret is empty the endpoint accepts unsigned payloads with a logged warning so the Resend "Send test event" button works during onboarding.
+- ✅ **`GET /api/admin/stats`** extended with an `email_health` block: `sent / delivered / bounced / opened / clicked / complained` counts, computed `bounce_rate_pct` and `open_rate_pct`, the most recent event timestamp + type, and a `webhook_configured` flag (true once the signing secret is in `.env`).
+- ✅ **Email Health card** on the Admin Dashboard — 6 metric tiles with traffic-light coloring (open rate green ≥25%, amber ≥10%, grey otherwise; bounce rate green <2%, amber 2-5%, red ≥5%), live "Webhook configured" / "Webhook secret missing" badge, plus bounce-rate / open-rate / last-event line. Live-verified on preview after seeding via `POST /api/webhooks/resend` (1 delivered event → card updated instantly).
+- ✅ **Production env cutover**:
+  - `SENDER_EMAIL=Live Astrology <hello@liveastrology.app>` — domain is verified on Resend.
+  - `ADMIN_SECRET` rotated to a 48-char `secrets.token_urlsafe(36)` value (also recorded in `/app/memory/test_credentials.md`).
+  - `RESEND_WEBHOOK_SECRET=` slot added to `.env` (paste the `whsec_…` value from https://resend.com/webhooks → endpoint).
+- ✅ Test suite grew to **35 tests** (was 30): `test_resend_webhook_unsigned_accepted_in_dev`, `test_resend_webhook_records_each_event_type`, `test_admin_stats_includes_email_health`, `test_resend_webhook_rejects_invalid_signature_when_secret_set`, `test_resend_webhook_accepts_valid_svix_signature` (real svix sign+verify round-trip). All passing.
+
 ### 2026-02-14 · Session 2f · Jupiter + Saturn, static-page i18n, admin subscribers, Redis-ready limiter, external cron
 - ✅ **Jupiter + Saturn** in Houses + Aspects:
   - Introduced `ChartPlanetName = PlanetName | 'jupiter' | 'saturn'` in `src/lib/astrology.ts` (keeps `PlanetName` narrow for the existing per-planet calculator tool that depends on curated content records).
@@ -210,8 +220,8 @@ never surface to the user (the API always responds 202).
 - ✅ Frontend forms wired to backend.
 
 ### P1 — Next (user action required)
-- Verify `liveastrology.app` domain at https://resend.com/domains using the SPF/DKIM/DMARC records in `/app/docs/DEPLOYMENT.md §1`, then swap `SENDER_EMAIL` to `hello@liveastrology.app`.
-- Set `LIVEASTROLOGY_URL` + `LIVEASTROLOGY_ADMIN_SECRET` in GitHub Actions secrets to activate the shipped `weekly-horoscope.yml` external cron (then set `ENABLE_SCHEDULER=0` to stop the in-process duplicate).
+- Paste the `whsec_…` signing secret from https://resend.com/webhooks → endpoint `https://liveastrology.app/api/webhooks/resend` into `RESEND_WEBHOOK_SECRET=` in `/app/backend/.env`, then restart backend (`sudo supervisorctl restart backend`). Email Health card will flip to "Webhook configured" and the endpoint will start cryptographically verifying every payload.
+- Set `LIVEASTROLOGY_URL` + `LIVEASTROLOGY_ADMIN_SECRET` in GitHub Actions secrets to activate the shipped `weekly-horoscope.yml` external cron, then set `ENABLE_SCHEDULER=0` in `/app/backend/.env` to stop the in-process duplicate.
 
 ### P2 — Backlog
 - Placidus / Koch / Equal house system options (whole-sign is live now; others are larger due to polar-latitude edge cases).

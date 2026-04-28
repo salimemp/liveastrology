@@ -1,23 +1,44 @@
-admin@liveastrology.app  /  ADMIN_SECRET=change-me-to-a-long-random-string-before-shipping
+# Live Astrology — admin & integration credentials
 
-There is no end-user authentication in the app.
+> **Updated**: 2026-04-28 (session: Resend webhooks + Email Health card)
 
-Admin-only HTTP endpoints (`/api/admin/*`) use a **shared-secret Bearer token**
-read from `ADMIN_SECRET` in `/app/backend/.env`:
+## Admin dashboard (Bearer auth)
 
-- `POST /api/admin/dispatch-weekly`  — manually fire the weekly horoscope to every confirmed subscriber.
-- `GET  /api/admin/stats`            — counts for subscribers / feedback / contacts / weekly dispatches.
+The admin UI at `/admin` and all `/api/admin/*` HTTP endpoints are protected
+by a shared-secret bearer token read from `ADMIN_SECRET` in `/app/backend/.env`.
 
-Example:
+- **URL**: `https://cosmic-admin-live.preview.emergentagent.com/admin`
+- **Secret**: `W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5`
 
-    curl -H "Authorization: Bearer change-me-to-a-long-random-string-before-shipping" \
+Example curl:
+
+    curl -H "Authorization: Bearer W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5" \
          https://cosmic-admin-live.preview.emergentagent.com/api/admin/stats
 
-**Before going live**, update `ADMIN_SECRET` in `/app/backend/.env` to a long
-random value (`openssl rand -hex 32`) and restart the backend.
+This secret was rotated to a 48-char `secrets.token_urlsafe(36)` value on
+2026-04-28. Rotate again before/after handing the project to a new owner
+(`openssl rand -hex 32` or `python -c "import secrets; print(secrets.token_urlsafe(36))"`).
 
-For Resend email delivery during testing mode, only the account owner's
-inbox (`salimmakrana@gmail.com`) receives emails — everyone else is
-silently dropped by Resend with a logged error. Verifying the
-`liveastrology.app` domain at https://resend.com/domains unlocks
-production delivery.
+There is **no end-user authentication** in the app.
+
+## Resend (transactional email)
+
+- API key already set in `/app/backend/.env` (`RESEND_API_KEY`).
+- Domain `liveastrology.app` is verified — sender is `hello@liveastrology.app`.
+- **Webhook signing secret** (`RESEND_WEBHOOK_SECRET`): currently empty.
+  - Configure at https://resend.com/webhooks → add endpoint
+    `https://liveastrology.app/api/webhooks/resend`
+    (or the preview URL above for staging),
+    subscribe to `email.delivered`, `email.bounced`, `email.opened`,
+    `email.clicked`, `email.complained`, copy the `whsec_…` value into
+    `RESEND_WEBHOOK_SECRET`, and restart the backend. The Email Health
+    card on the Admin Dashboard will flip to "Webhook configured".
+  - While the secret is empty, the endpoint accepts unsigned payloads and
+    logs a warning (so you can ingest test events from the Resend UI).
+
+## Cloudflare Turnstile
+
+- Site key (public, in frontend bundle): `0x4AAAAAADExRj14IvpGPMYD`
+- Secret (in `/app/backend/.env` → `CF_TURNSTILE_SECRET`):
+  `0x4AAAAAADExRnUFTnX-fhVqfeVZkrWfEKs`
+- Test bypass: set `TURNSTILE_DISABLED=1` (already set in pytest fixtures).

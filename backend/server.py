@@ -59,6 +59,7 @@ NOTIFY_EMAIL  = os.environ.get("NOTIFY_EMAIL", "notify@liveastrology.app")
 MONGO_URL     = os.environ["MONGO_URL"]
 DB_NAME       = os.environ["DB_NAME"]
 ADMIN_SECRET  = os.environ.get("ADMIN_SECRET", "")
+RESEND_WEBHOOK_SECRET = os.environ.get("RESEND_WEBHOOK_SECRET", "")
 
 # ---------- DB ----------
 _mongo = AsyncIOMotorClient(MONGO_URL)
@@ -506,6 +507,19 @@ async def admin_stats() -> dict[str, Any]:
     feedback_total      = await db.feedback.count_documents({})
     contacts_total      = await db.contacts.count_documents({})
     dispatches_total    = await db.weekly_dispatches.count_documents({})
+
+    # Email deliverability health from ingested Resend webhook events.
+    sent       = await db.email_events.count_documents({"type": "email.sent"})
+    delivered  = await db.email_events.count_documents({"type": "email.delivered"})
+    bounced    = await db.email_events.count_documents({"type": "email.bounced"})
+    opened     = await db.email_events.count_documents({"type": "email.opened"})
+    complained = await db.email_events.count_documents({"type": "email.complained"})
+    clicked    = await db.email_events.count_documents({"type": "email.clicked"})
+    last_event = await db.email_events.find_one({}, {"_id": 0, "type": 1, "received_at": 1}, sort=[("received_at", -1)])
+
+    bounce_rate = round((bounced / delivered) * 100, 2) if delivered else 0.0
+    open_rate   = round((opened  / delivered) * 100, 2) if delivered else 0.0
+
     return {
         "subscribers": {
             "total": subscribers_total,
@@ -516,6 +530,19 @@ async def admin_stats() -> dict[str, Any]:
         "feedback_total": feedback_total,
         "contacts_total": contacts_total,
         "weekly_dispatches_total": dispatches_total,
+        "email_health": {
+            "sent": sent,
+            "delivered": delivered,
+            "bounced": bounced,
+            "opened": opened,
+            "clicked": clicked,
+            "complained": complained,
+            "bounce_rate_pct": bounce_rate,
+            "open_rate_pct": open_rate,
+            "last_event_type": last_event["type"] if last_event else None,
+            "last_event_at": last_event["received_at"].isoformat() if last_event and isinstance(last_event.get("received_at"), datetime) else None,
+            "webhook_configured": bool(RESEND_WEBHOOK_SECRET),
+        },
     }
 
 
@@ -677,3 +704,70 @@ async def admin_subscriber_action(email: str, payload: SubscriberAction = Body(.
         return {"status": "ok", "email": email, "action": "resend_confirm"}
 
     raise HTTPException(status_code=400, detail=f"Unknown action: {payload.action}")
+
+
+# ---------- Resend webhook ingestion ----------
+# Resend posts deliverability events here (configured at https://resend.com/webhooks).
+# Signed with Svix headers (svix-id / svix-timestamp / svix-signature). When
+# RESEND_WEBHOOK_SECRET is set the payload is cryptographically verified;
+# otherwise the request is logged with a warning and accepted (dev mode).
+_TRACKED_EVENT_TYPES = {
+    "email.sent",
+    "email.delivered",
+    "email.delivery_delayed",
+    "email.bounced",
+    "email.opened",
+    "email.clicked",
+    "email.complained",
+}
+
+
+@app.post("/api/webhooks/resend", status_code=status.HTTP_202_ACCEPTED)
+async def resend_webhook(request: Request) -> dict[str, Any]:
+    raw = await request.body()
+
+    if RESEND_WEBHOOK_SECRET:
+        from svix.webhooks import Webhook, WebhookVerificationError  # local import: optional dep at runtime
+        headers = {
+            "svix-id":        request.headers.get("svix-id", ""),
+            "svix-timestamp": request.headers.get("svix-timestamp", ""),
+            "svix-signature": request.headers.get("svix-signature", ""),
+        }
+        try:
+            Webhook(RESEND_WEBHOOK_SECRET).verify(raw, headers)
+        except WebhookVerificationError as exc:
+            logger.warning("Resend webhook signature verification failed: %s", exc)
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    else:
+        logger.warning("Resend webhook received without RESEND_WEBHOOK_SECRET configured — accepting unverified payload")
+
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Resend webhook: invalid JSON: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    event_type = body.get("type", "unknown")
+    data = body.get("data") or {}
+    email_id = data.get("email_id") or data.get("id")
+    to_field = data.get("to")
+    if isinstance(to_field, list):
+        recipient = to_field[0] if to_field else None
+    else:
+        recipient = to_field
+
+    await db.email_events.insert_one({
+        "type": event_type,
+        "email_id": email_id,
+        "to": recipient,
+        "subject": data.get("subject"),
+        "from": data.get("from"),
+        "tags": data.get("tags"),
+        "raw": body,
+        "received_at": _now(),
+    })
+
+    if event_type not in _TRACKED_EVENT_TYPES:
+        logger.info("Resend webhook: untracked event type %s", event_type)
+
+    return {"status": "ok", "event": event_type}

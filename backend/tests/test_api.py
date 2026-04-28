@@ -455,3 +455,118 @@ async def test_admin_subscriber_action_requires_auth(client):
         json={"action": "delete"},
     )
     assert r.status_code == 401
+
+
+
+# ---------- Resend webhook ingestion ----------
+
+async def test_resend_webhook_unsigned_accepted_in_dev(client):
+    """When RESEND_WEBHOOK_SECRET is empty (dev mode), unsigned payloads are accepted."""
+    ac, db = client
+    r = await ac.post("/api/webhooks/resend", json={
+        "type": "email.delivered",
+        "created_at": "2026-02-14T10:00:00Z",
+        "data": {
+            "email_id": "abc-123",
+            "from": "hello@liveastrology.app",
+            "to": ["alex@example.com"],
+            "subject": "Welcome",
+        },
+    })
+    assert r.status_code == 202
+    assert r.json() == {"status": "ok", "event": "email.delivered"}
+
+    stored = await db.email_events.find_one({"email_id": "abc-123"}, {"_id": 0})
+    assert stored is not None
+    assert stored["type"] == "email.delivered"
+    assert stored["to"] == "alex@example.com"
+    assert stored["subject"] == "Welcome"
+
+
+async def test_resend_webhook_records_each_event_type(client):
+    """delivered / bounced / opened / complained all reach the email_events collection."""
+    ac, db = client
+    for et in ("email.sent", "email.delivered", "email.bounced", "email.opened", "email.complained"):
+        r = await ac.post("/api/webhooks/resend", json={
+            "type": et,
+            "data": {"email_id": f"id-{et}", "to": ["x@example.com"]},
+        })
+        assert r.status_code == 202
+
+    counts = {
+        et: await db.email_events.count_documents({"type": et})
+        for et in ("email.sent", "email.delivered", "email.bounced", "email.opened", "email.complained")
+    }
+    assert counts == {"email.sent": 1, "email.delivered": 1, "email.bounced": 1, "email.opened": 1, "email.complained": 1}
+
+
+async def test_admin_stats_includes_email_health(client):
+    """/api/admin/stats now exposes deliverability counts derived from webhook events."""
+    ac, _ = client
+    # Seed webhook events
+    for et, n in [("email.delivered", 10), ("email.bounced", 1), ("email.opened", 4), ("email.complained", 0), ("email.sent", 11)]:
+        for i in range(n):
+            await ac.post("/api/webhooks/resend", json={
+                "type": et,
+                "data": {"email_id": f"{et}-{i}", "to": ["x@example.com"]},
+            })
+
+    r = await ac.get("/api/admin/stats", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    eh = r.json()["email_health"]
+    assert eh["delivered"] == 10
+    assert eh["bounced"] == 1
+    assert eh["opened"] == 4
+    assert eh["sent"] == 11
+    assert eh["bounce_rate_pct"] == 10.0
+    assert eh["open_rate_pct"] == 40.0
+    assert eh["webhook_configured"] is False
+    assert eh["last_event_type"] in ("email.sent", "email.delivered", "email.bounced", "email.opened")
+
+
+async def test_resend_webhook_rejects_invalid_signature_when_secret_set(client, monkeypatch):
+    """When RESEND_WEBHOOK_SECRET is configured, unsigned/wrong-signed payloads are rejected with 401."""
+    import server
+    monkeypatch.setattr(server, "RESEND_WEBHOOK_SECRET", "whsec_test_dummy_secret_for_unit_test")
+
+    ac, _ = client
+    r = await ac.post("/api/webhooks/resend", json={"type": "email.delivered", "data": {}})
+    assert r.status_code == 401
+    assert "signature" in r.json()["detail"].lower()
+
+
+async def test_resend_webhook_accepts_valid_svix_signature(client, monkeypatch):
+    """A correctly-signed Svix payload passes verification and is recorded."""
+    import json as _json
+    from svix.webhooks import Webhook
+    import server
+
+    secret = "whsec_" + "A" * 32  # base64-friendly fake secret accepted by svix-py
+    monkeypatch.setattr(server, "RESEND_WEBHOOK_SECRET", secret)
+
+    body = {
+        "type": "email.bounced",
+        "data": {"email_id": "signed-1", "to": ["bounced@example.com"], "subject": "Hi"},
+    }
+    payload = _json.dumps(body)
+    msg_id = "msg_test_1"
+    import datetime as _dt
+    now_dt = _dt.datetime.now(tz=_dt.timezone.utc)
+    timestamp = str(int(now_dt.timestamp()))
+    signature = Webhook(secret).sign(msg_id=msg_id, timestamp=now_dt, data=payload)
+
+    ac, db = client
+    r = await ac.post(
+        "/api/webhooks/resend",
+        content=payload,
+        headers={
+            "Content-Type": "application/json",
+            "svix-id": msg_id,
+            "svix-timestamp": timestamp,
+            "svix-signature": signature,
+        },
+    )
+    assert r.status_code == 202, r.text
+    stored = await db.email_events.find_one({"email_id": "signed-1"}, {"_id": 0})
+    assert stored is not None
+    assert stored["type"] == "email.bounced"
