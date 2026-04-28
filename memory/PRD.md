@@ -85,7 +85,24 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
-### 2026-02-14 · Session 2b · Scheduler, rate limits, i18n, tests, preview CLI
+### 2026-02-14 · Session 2c · Real ephemeris + i18n full + admin UI + contact
+- ✅ **Real astronomical ephemeris in weekly content**: swapped canned vars for `astronomy-engine` Python calls in `content_generator.py`. `build_weekly_vars()` now computes live Sun/Moon/Mercury/Venus/Mars signs from the ecliptic longitude of each body, plus the Moon's sign progression across the whole week (~6-hour resolution). Falls back to deterministic dummy signs if `astronomy-engine` is absent, so tests still run on minimal environments.
+- ✅ **i18n expansion** — full 3-locale set:
+  - `en.json` + **`es.json` (Spanish)** + **`hi.json` (Hindi)** covering nav, hero, features, faq, feedback page, contact page, footer newsletter, and common strings.
+  - `<LanguageSwitcher>` mounted in the navbar (hidden on mobile for now).
+  - Migrated to `useTranslation()`: navigation labels, hero title/subtitle/CTA, FAQ heading, `FeedbackPage` (title/tagline/intro/thank-you/buttons), `ContactPage` (title/intro/submit), `Footer` newsletter (title/body/placeholder/button/success).
+  - Live-tested switching EN → ES → HI on the preview: `"Explore Free Astrology Charts"` → `"Descubre tu Carta Astral Gratis"` → `"मुफ्त ज्योतिष चार्ट बनाएँ"`.
+- ✅ **Contact page wired to backend** — `/app/liveastrology/src/components/ContactPage.tsx` now POSTs `{name,email,subject,message}` to `/api/contact`, renders the returned `CT-XXXXXX` ticket ID in the success card, handles validation & errors with loading state. Live-verified: HTTP 202 + ticket `#CT-KGXIYN`.
+- ✅ **Admin dashboard** at `/admin` — `AdminDashboard.tsx`:
+  - Bearer-secret password gate (state-only, never localStorage).
+  - Live stats cards: confirmed / pending / unsubscribed / total subscribers, feedback count, contacts count, weekly dispatches count.
+  - "Send weekly horoscope now" button (calls `POST /api/admin/dispatch-weekly`).
+  - Refresh-stats button.
+  - `robots: noindex, nofollow` via new `useSeo({ noIndex: true })` flag.
+- ✅ Extended `PageSeo` interface + `useSeo` with `noIndex` option.
+- ✅ Live smoke-tested end-to-end on preview: EN/ES/HI language switch, admin login with correct secret, admin dispatch trigger, contact form 202 with ticket ID, pytest 15/15 green.
+
+### 2026-02-14 · Session 2b · Scheduler, rate limits, i18n Phase 0, tests, preview CLI
 - ✅ **i18n Phase 0**: `react-i18next` + `i18next-browser-languagedetector` installed; `/src/i18n/index.ts` init module; `/src/i18n/locales/en.json` baseline JSON; language detection with localStorage cache under key `liveastrology:lang`; `<LanguageSwitcher>` component (auto-hides while only one locale registered); nav links + hero title + hero subtitle + CTA + FAQ heading migrated to `useTranslation()`.
 - ✅ **Weekly horoscope cron**:
   - `/app/backend/content_generator.py` — deterministic weekly-vars builder (Sun sign lookup, rotating top-3 signs, 6 canned rituals, ISO-week stable content).
@@ -147,17 +164,15 @@ never surface to the user (the API always responds 202).
 - ✅ Frontend forms wired to backend.
 
 ### P1 — Next
-- Extend i18n beyond Phase 0: migrate remaining strings (feedback form, footer, blog, terms/privacy), add Spanish + Hindi locales.
-- Real ephemeris content inside `content_generator.build_weekly_vars` (replace canned vars with `skyfield`-derived transits).
-- Verify `liveastrology.app` domain in Resend → swap SENDER_EMAIL → production delivery.
-- Wire `LanguageSwitcher` into the navbar/footer once a 2nd locale ships.
+- Houses + aspects calculators (backend model + frontend display).
+- Extend i18n to remaining pages (Terms, Privacy, About, Refund, Blog posts) — JSON infra is ready; it's just wiring.
+- Verify `liveastrology.app` domain in Resend → swap `SENDER_EMAIL` in `.env` → production delivery unlocked.
 
 ### P2 — Backlog
-- Houses + aspects calculators.
-- `/contact` page frontend (endpoint already live at `/api/contact`).
-- Redis-backed rate limiter for multi-replica deployments.
-- Admin dashboard UI (view subscribers, feedback queue, opt-in funnel).
-- Abuse protection beyond rate limits: Cloudflare Turnstile on `/api/subscribe` + `/api/feedback`.
+- Cloudflare Turnstile on `/api/subscribe` + `/api/feedback` (needs site key + secret key from user).
+- Redis-backed slowapi for multi-replica rate limiting (current: single-pod in-memory).
+- Admin dashboard pagination: list recent subscribers / feedback / contacts (currently just counts).
+- Weekly-brief editorial layer: human narrative on top of the ephemeris-derived transits.
 
 ## Test credentials
 
