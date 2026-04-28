@@ -46,6 +46,7 @@ from slowapi.util import get_remote_address
 
 import email_service
 import scheduler as scheduler_module
+import turnstile as turnstile_module
 
 load_dotenv()
 
@@ -188,6 +189,7 @@ class SubscribeIn(BaseModel):
     email: EmailStr
     first_name: Annotated[str | None, Field(default=None, max_length=80)] = None
     source: Annotated[str, Field(default="footer", max_length=40)] = "footer"
+    cf_turnstile_token: Annotated[str | None, Field(default=None, max_length=3000)] = None
 
 
 class UnsubscribeIn(BaseModel):
@@ -201,6 +203,7 @@ class FeedbackIn(BaseModel):
     rating: Annotated[int | None, Field(default=None, ge=0, le=5)] = None
     category: Annotated[Literal["general", "bug", "feature", "content", "praise"], Field(default="general")] = "general"
     message: Annotated[str, Field(min_length=10, max_length=4000)]
+    cf_turnstile_token: Annotated[str | None, Field(default=None, max_length=3000)] = None
 
 
 class ContactIn(BaseModel):
@@ -208,6 +211,7 @@ class ContactIn(BaseModel):
     email: EmailStr
     subject: Annotated[str, Field(min_length=1, max_length=200)]
     message: Annotated[str, Field(min_length=10, max_length=4000)]
+    cf_turnstile_token: Annotated[str | None, Field(default=None, max_length=3000)] = None
 
 
 # ---------- Routes ----------
@@ -219,6 +223,8 @@ async def health() -> dict[str, Any]:
 @app.post("/api/subscribe", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit("5/minute")
 async def subscribe(request: Request, payload: SubscribeIn = Body(...)) -> dict[str, Any]:
+    if not await turnstile_module.verify(payload.cf_turnstile_token, remote_ip=_client_ip(request)):
+        raise HTTPException(status_code=403, detail="Human verification failed — please retry.")
     email = payload.email.lower()
     first_name = _first_name(payload.first_name, email)
     confirm_token = _token()
@@ -347,6 +353,8 @@ async def unsubscribe(request: Request, token: str | None = None, email: str | N
 @app.post("/api/feedback", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit("3/minute")
 async def feedback(request: Request, payload: FeedbackIn = Body(...)) -> dict[str, Any]:
+    if not await turnstile_module.verify(payload.cf_turnstile_token, remote_ip=_client_ip(request)):
+        raise HTTPException(status_code=403, detail="Human verification failed — please retry.")
     ticket_id = _short_id("FB")
     first_name = _first_name(payload.name, payload.email)
     category_labels = {
@@ -420,6 +428,8 @@ async def feedback(request: Request, payload: FeedbackIn = Body(...)) -> dict[st
 @app.post("/api/contact", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit("3/minute")
 async def contact(request: Request, payload: ContactIn = Body(...)) -> dict[str, Any]:
+    if not await turnstile_module.verify(payload.cf_turnstile_token, remote_ip=_client_ip(request)):
+        raise HTTPException(status_code=403, detail="Human verification failed — please retry.")
     ticket_id = _short_id("CT")
     first_name = _first_name(payload.name, payload.email)
     received_at = _now().strftime("%Y-%m-%d %H:%M UTC")
@@ -501,3 +511,30 @@ async def admin_stats() -> dict[str, Any]:
         "weekly_dispatches_total": dispatches_total,
     }
 
+
+
+def _serialize_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    """Prepare a MongoDB doc for JSON output — strip _id and ISO-format dates."""
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    for k, v in list(out.items()):
+        if isinstance(v, datetime):
+            out[k] = v.isoformat()
+    return out
+
+
+@app.get("/api/admin/feedback", dependencies=[Depends(require_admin)])
+async def admin_feedback(limit: int = 20) -> dict[str, Any]:
+    """Most recent feedback submissions, newest first."""
+    limit = max(1, min(limit, 100))
+    cursor = db.feedback.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+    items = [_serialize_doc(d) async for d in cursor]
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/admin/contacts", dependencies=[Depends(require_admin)])
+async def admin_contacts(limit: int = 20) -> dict[str, Any]:
+    """Most recent contact-form submissions, newest first."""
+    limit = max(1, min(limit, 100))
+    cursor = db.contacts.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+    items = [_serialize_doc(d) async for d in cursor]
+    return {"items": items, "count": len(items)}

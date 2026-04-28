@@ -219,3 +219,78 @@ async def test_rate_limit_on_subscribe(client):
     finally:
         server.limiter.enabled = False
         server.limiter.reset()
+
+
+
+async def test_admin_feedback_queue(client):
+    """/api/admin/feedback returns newest-first with mailto-ready fields."""
+    ac, _ = client
+    # Seed 3 feedback submissions
+    for i in range(3):
+        await ac.post("/api/feedback", json={
+            "name": f"User {i}", "email": f"u{i}@example.com",
+            "category": "praise", "message": f"Queue test message number {i}",
+        })
+    r = await ac.get("/api/admin/feedback", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 3
+    assert len(body["items"]) == 3
+    messages = {item["message"] for item in body["items"]}
+    assert messages == {"Queue test message number 0", "Queue test message number 1", "Queue test message number 2"}
+    # No _id leaking
+    assert "_id" not in body["items"][0]
+    # Required fields present
+    for item in body["items"]:
+        assert "ticket_id" in item
+        assert item["ticket_id"].startswith("FB-")
+        assert "email" in item
+        assert "created_at" in item
+
+
+async def test_admin_contacts_queue(client):
+    """/api/admin/contacts returns contact submissions newest-first."""
+    ac, _ = client
+    for i in range(2):
+        await ac.post("/api/contact", json={
+            "name": f"Contact {i}", "email": f"c{i}@example.com",
+            "subject": f"Subject {i}", "message": f"Contact queue test message {i}",
+        })
+    r = await ac.get("/api/admin/contacts", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    subjects = {item["subject"] for item in body["items"]}
+    assert subjects == {"Subject 0", "Subject 1"}
+    assert body["items"][0]["ticket_id"].startswith("CT-")
+
+
+async def test_admin_queue_requires_auth(client):
+    ac, _ = client
+    for path in ["/api/admin/feedback", "/api/admin/contacts"]:
+        r = await ac.get(path)
+        assert r.status_code == 401, f"{path} should require auth"
+
+
+async def test_turnstile_rejects_when_enabled(client, monkeypatch):
+    """When TURNSTILE_DISABLED is off and no token is supplied, /subscribe 403s."""
+    import os, turnstile as t_mod
+    monkeypatch.setenv("TURNSTILE_DISABLED", "0")
+    monkeypatch.setenv("CF_TURNSTILE_SECRET", "fake-secret")
+
+    async def fake_verify(token, *, remote_ip=None):
+        # Valid only if token starts with 'good'
+        return bool(token and token.startswith("good"))
+    monkeypatch.setattr(t_mod, "verify", fake_verify)
+
+    ac, _ = client
+    # Missing token
+    r = await ac.post("/api/subscribe", json={"email": "captcha-miss@example.com"})
+    assert r.status_code == 403
+    assert "verification" in r.json()["detail"].lower()
+    # Bad token
+    r = await ac.post("/api/subscribe", json={"email": "captcha-bad@example.com", "cf_turnstile_token": "bad-token"})
+    assert r.status_code == 403
+    # Good token
+    r = await ac.post("/api/subscribe", json={"email": "captcha-ok@example.com", "cf_turnstile_token": "good-token"})
+    assert r.status_code == 202

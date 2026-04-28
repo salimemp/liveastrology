@@ -85,6 +85,22 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2d · Cloudflare Turnstile + admin triage queues
+- ✅ **Cloudflare Turnstile** on all 4 public forms (subscribe / feedback / contact / blog-newsletter):
+  - New `<Turnstile>` component with lazy script loading, explicit-render mode, and imperative `reset()` / `getToken()` via `useImperativeHandle`.
+  - Public site key in `/src/lib/turnstileConfig.ts`.
+  - Secret in `/app/backend/.env` (`CF_TURNSTILE_SECRET`).
+  - Backend `turnstile.py` verifies tokens against `https://challenges.cloudflare.com/turnstile/v0/siteverify` (async via `httpx`). 403 on missing/invalid tokens.
+  - Test-env bypass via `TURNSTILE_DISABLED=1` (set by conftest).
+  - Live-verified: `POST /api/{subscribe,feedback,contact}` without token → **HTTP 403** with friendly "Human verification failed" detail.
+- ✅ **Admin triage queues** — `AdminDashboard` now has 3 tabs: Stats / Feedback queue / Contact queue.
+  - Newest-first lists with ticket ID badge (colour-coded), user name + email, category/rating, timestamp, and the full message.
+  - **One-click mailto reply** button on each item, pre-filling subject `Re: … (#TICKET-ID)`.
+  - Empty-state illustrations.
+  - New endpoints `GET /api/admin/feedback?limit=20` and `GET /api/admin/contacts?limit=20` (Bearer-protected, newest-first, `_id` stripped).
+- ✅ Test suite grew to **19 tests** (was 15): added admin queue tests (auth + content + `_id` exclusion) and Turnstile enforcement test with mocked verify.
+- ✅ Live-verified feedback & contact queues in the admin UI — 6 feedback items + 8 contact items render with working reply mailtos.
+
 ### 2026-02-14 · Session 2c · Real ephemeris + i18n full + admin UI + contact
 - ✅ **Real astronomical ephemeris in weekly content**: swapped canned vars for `astronomy-engine` Python calls in `content_generator.py`. `build_weekly_vars()` now computes live Sun/Moon/Mercury/Venus/Mars signs from the ecliptic longitude of each body, plus the Moon's sign progression across the whole week (~6-hour resolution). Falls back to deterministic dummy signs if `astronomy-engine` is absent, so tests still run on minimal environments.
 - ✅ **i18n expansion** — full 3-locale set:
@@ -165,13 +181,12 @@ never surface to the user (the API always responds 202).
 
 ### P1 — Next
 - Houses + aspects calculators (backend model + frontend display).
-- Extend i18n to remaining pages (Terms, Privacy, About, Refund, Blog posts) — JSON infra is ready; it's just wiring.
 - Verify `liveastrology.app` domain in Resend → swap `SENDER_EMAIL` in `.env` → production delivery unlocked.
+- Extend i18n to remaining pages (Terms, Privacy, About, Refund, Blog posts) — JSON infra is ready; it's just wiring.
 
 ### P2 — Backlog
-- Cloudflare Turnstile on `/api/subscribe` + `/api/feedback` (needs site key + secret key from user).
 - Redis-backed slowapi for multi-replica rate limiting (current: single-pod in-memory).
-- Admin dashboard pagination: list recent subscribers / feedback / contacts (currently just counts).
+- Admin queue "mark as resolved" flag + pagination beyond the 20-item slice.
 - Weekly-brief editorial layer: human narrative on top of the ephemeris-derived transits.
 
 ## Test credentials

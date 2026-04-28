@@ -27,6 +27,7 @@ os.environ.setdefault("SENDER_EMAIL", "test@example.com")
 os.environ.setdefault("NOTIFY_EMAIL", "notify-test@example.com")
 os.environ.setdefault("APP_ORIGIN", "http://testserver")
 os.environ.setdefault("ADMIN_SECRET", "test-admin-secret")
+os.environ.setdefault("TURNSTILE_DISABLED", "1")
 
 
 @pytest.fixture
