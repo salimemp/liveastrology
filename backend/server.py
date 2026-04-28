@@ -75,7 +75,14 @@ def _client_ip(request: Request) -> str:
     return get_remote_address(request)
 
 
-limiter = Limiter(key_func=_client_ip, default_limits=["120/minute"])
+limiter = Limiter(
+    key_func=_client_ip,
+    default_limits=["120/minute"],
+    # When REDIS_URL is set, slowapi stores counters in Redis so every
+    # replica/worker shares the same per-IP state. Without it, counters
+    # live in-process (fine for a single pod but not multi-replica).
+    storage_uri=os.environ.get("REDIS_URL") or "memory://",
+)
 
 # ---------- App ----------
 app = FastAPI(title="Live Astrology backend", version="1.0.0")
@@ -610,3 +617,63 @@ async def admin_subscribers_csv(status: str = "confirmed") -> PlainTextResponse:
             "X-Subscriber-Count": str(count),
         },
     )
+
+
+# ---------- Admin subscriber-edit endpoints ----------
+class SubscriberAction(BaseModel):
+    action: Literal["force_unsubscribe", "delete", "resend_confirm"]
+
+
+@app.get("/api/admin/subscribers", dependencies=[Depends(require_admin)])
+async def admin_list_subscribers(limit: int = 50, skip: int = 0, status: str = "all") -> dict[str, Any]:
+    """Paginated subscriber list for the admin UI. Same contract as the feedback/contact queues."""
+    limit = max(1, min(limit, 200))
+    skip = max(0, skip)
+    query: dict[str, Any] = {} if status == "all" else {"status": status}
+    total = await db.subscribers.count_documents(query)
+    projection = {"_id": 0, "confirm_token": 0, "unsub_token": 0}
+    cursor = db.subscribers.find(query, projection).sort("created_at", -1).skip(skip).limit(limit)
+    items = [_serialize_doc(d) async for d in cursor]
+    return {"items": items, "count": len(items), "total": total, "skip": skip, "limit": limit}
+
+
+@app.post("/api/admin/subscribers/{email}/actions", dependencies=[Depends(require_admin)])
+async def admin_subscriber_action(email: str, payload: SubscriberAction = Body(...)) -> dict[str, Any]:
+    """Mutating admin actions on a single subscriber:
+
+    - ``force_unsubscribe`` — flip status to unsubscribed (no email sent).
+    - ``delete``            — hard-delete the row.
+    - ``resend_confirm``    — re-send the opt-in email (useful when a user claims they didn't receive it).
+    """
+    email = email.lower()
+    sub = await db.subscribers.find_one({"email": email})
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+
+    if payload.action == "force_unsubscribe":
+        await db.subscribers.update_one(
+            {"email": email},
+            {"$set": {"status": "unsubscribed", "unsubscribed_at": _now(), "updated_at": _now()}},
+        )
+        return {"status": "ok", "email": email, "action": "force_unsubscribe"}
+
+    if payload.action == "delete":
+        await db.subscribers.delete_one({"email": email})
+        return {"status": "ok", "email": email, "action": "delete"}
+
+    if payload.action == "resend_confirm":
+        if sub.get("status") == "confirmed":
+            raise HTTPException(status_code=400, detail="Subscriber is already confirmed")
+        confirm_url = f"{APP_ORIGIN}/api/subscribe/confirm?token={sub['confirm_token']}"
+        await email_service.send_template(
+            "subscribe_confirm",
+            to=email,
+            list_unsubscribe=_unsub_url(sub["unsub_token"]),
+            first_name=sub.get("first_name") or _first_name(None, email),
+            email=email,
+            confirm_url=confirm_url,
+            unsubscribe_url=_unsub_url(sub["unsub_token"]),
+        )
+        return {"status": "ok", "email": email, "action": "resend_confirm"}
+
+    raise HTTPException(status_code=400, detail=f"Unknown action: {payload.action}")

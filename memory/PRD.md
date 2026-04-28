@@ -85,6 +85,21 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2f · Jupiter + Saturn, static-page i18n, admin subscribers, Redis-ready limiter, external cron
+- ✅ **Jupiter + Saturn** in Houses + Aspects:
+  - Introduced `ChartPlanetName = PlanetName | 'jupiter' | 'saturn'` in `src/lib/astrology.ts` (keeps `PlanetName` narrow for the existing per-planet calculator tool that depends on curated content records).
+  - `calculateHousesAndAspects()` now computes 7 planetary positions + up to 21 aspect pairs per chart.
+  - Glyphs ♃ ♄ + labels added to `HousesAndAspects.tsx`; grid reflows to 7 columns on wide screens.
+- ✅ **Static pages wired to i18n** — TermsOfService / PrivacyPolicy / AboutUs / RefundPolicy titles + intros + back-button labels now pull from `pages.*` + `common.back_to_home` keys. Live-verified in Hindi: navbar + privacy page both render correctly (`गोपनीयता नीति` title, Hindi intro).
+- ✅ **Admin — subscribers list + per-subscriber actions**:
+  - New `GET /api/admin/subscribers?status=all|pending|confirmed|unsubscribed&limit=&skip=` (tokens stripped from projection for safety).
+  - New `POST /api/admin/subscribers/{email}/actions` with actions: `force_unsubscribe`, `delete`, `resend_confirm` (blocks re-send if already confirmed → 400).
+  - New "Subscribers" tab in the admin UI with a table view, status pills, and per-row action buttons (`Resend confirm` for pending only, `Unsubscribe`, `Delete` with browser confirm prompt).
+  - 6 new tests covering list, all 3 actions, 400/404/401 error paths.
+- ✅ **Redis-ready rate limiter** — `slowapi.Limiter` now accepts `storage_uri=os.environ.get("REDIS_URL") or "memory://"`. Drop a `REDIS_URL` into `.env` the moment you scale beyond one pod — zero other code changes required.
+- ✅ **External GitHub-Actions cron** — shipped `/app/.github/workflows/weekly-horoscope.yml` that fires every Sunday 18:00 UTC, calls `POST /api/admin/dispatch-weekly` with the admin secret, and fails loudly if the HTTP code isn't 200. Pairs with `ENABLE_SCHEDULER=0` in `.env` to prevent double-fire.
+- ✅ Test suite grew to **30 tests** (was 24). All passing.
+
 ### 2026-02-14 · Session 2e · Houses + Aspects, Admin CSV, mark-resolved, pagination
 - ✅ **Houses + Aspects** (frontend-only, uses existing `astronomy-engine` JS build):
   - New `calculateRisingDegree()` + `calculateHousesAndAspects()` in `src/lib/astrology.ts`.
@@ -194,18 +209,17 @@ never surface to the user (the API always responds 202).
 - ✅ Real backend with Resend + MongoDB.
 - ✅ Frontend forms wired to backend.
 
-### P1 — Next
-- Verify `liveastrology.app` domain in Resend → swap `SENDER_EMAIL` in `.env` → production delivery unlocked.
-  **See `/app/docs/DEPLOYMENT.md` section 1 for the exact DNS records to add.**
-- Wire static pages (Terms / Privacy / About / Refund) to the new `pages.*` i18n keys.
-- Outer-planet support in Houses + Aspects (Jupiter, Saturn — astronomy-engine already provides them).
+### P1 — Next (user action required)
+- Verify `liveastrology.app` domain at https://resend.com/domains using the SPF/DKIM/DMARC records in `/app/docs/DEPLOYMENT.md §1`, then swap `SENDER_EMAIL` to `hello@liveastrology.app`.
+- Set `LIVEASTROLOGY_URL` + `LIVEASTROLOGY_ADMIN_SECRET` in GitHub Actions secrets to activate the shipped `weekly-horoscope.yml` external cron (then set `ENABLE_SCHEDULER=0` to stop the in-process duplicate).
 
 ### P2 — Backlog
-- Placidus house system option (requires polar-latitude edge-case handling).
+- Placidus / Koch / Equal house system options (whole-sign is live now; others are larger due to polar-latitude edge cases).
 - Declinational aspects (parallel / contraparallel).
-- Admin dashboard "edit subscriber" (change status manually) + "send test email" helper.
-- Redis-backed slowapi for multi-replica rate limiting (single-pod is fine for now).
-- External GitHub-Actions cron replacing the in-process scheduler (`docs/DEPLOYMENT.md` §6).
+- Per-planet interpretations for Jupiter & Saturn on the birth-chart page (glyphs + positions are live; narrative copy is pending).
+- Admin row-click drill-downs (view full thread of one subscriber's history).
+- Multi-replica deployment ops (Redis already wired — just set `REDIS_URL`).
+- Weekly-brief editorial layer: human narrative on top of the ephemeris-derived transits.
 
 ## Test credentials
 

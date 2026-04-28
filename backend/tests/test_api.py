@@ -380,3 +380,78 @@ async def test_feedback_pagination(client):
     assert body["total"] == 5
     assert body["limit"] == 2
     assert body["skip"] == 0
+
+
+
+async def test_admin_list_subscribers(client):
+    ac, _ = client
+    for i in range(3):
+        await ac.post("/api/subscribe", json={"email": f"s{i}@example.com", "first_name": f"S{i}"})
+    r = await ac.get("/api/admin/subscribers", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3
+    assert len(body["items"]) == 3
+    assert "confirm_token" not in body["items"][0]
+    assert "unsub_token" not in body["items"][0]
+
+
+async def test_admin_subscriber_force_unsubscribe(client):
+    ac, db = client
+    await ac.post("/api/subscribe", json={"email": "force@example.com"})
+    r = await ac.post(
+        "/api/admin/subscribers/force@example.com/actions",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"action": "force_unsubscribe"},
+    )
+    assert r.status_code == 200
+    sub = await db.subscribers.find_one({"email": "force@example.com"}, {"_id": 0})
+    assert sub["status"] == "unsubscribed"
+
+
+async def test_admin_subscriber_delete(client):
+    ac, db = client
+    await ac.post("/api/subscribe", json={"email": "bye@example.com"})
+    r = await ac.post(
+        "/api/admin/subscribers/bye@example.com/actions",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"action": "delete"},
+    )
+    assert r.status_code == 200
+    sub = await db.subscribers.find_one({"email": "bye@example.com"})
+    assert sub is None
+
+
+async def test_admin_subscriber_resend_confirm(client, sent_emails):
+    ac, _ = client
+    await ac.post("/api/subscribe", json={"email": "redo@example.com"})
+    sent_emails.clear()
+    r = await ac.post(
+        "/api/admin/subscribers/redo@example.com/actions",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"action": "resend_confirm"},
+    )
+    assert r.status_code == 200
+    assert any(e["slug"] == "subscribe_confirm" for e in sent_emails)
+
+
+async def test_admin_subscriber_resend_confirm_rejects_already_confirmed(client):
+    ac, db = client
+    await ac.post("/api/subscribe", json={"email": "done@example.com"})
+    sub = await db.subscribers.find_one({"email": "done@example.com"}, {"_id": 0})
+    await ac.get(f"/api/subscribe/confirm?token={sub['confirm_token']}", follow_redirects=False)
+    r = await ac.post(
+        "/api/admin/subscribers/done@example.com/actions",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"action": "resend_confirm"},
+    )
+    assert r.status_code == 400
+
+
+async def test_admin_subscriber_action_requires_auth(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/subscribers/nope@example.com/actions",
+        json={"action": "delete"},
+    )
+    assert r.status_code == 401

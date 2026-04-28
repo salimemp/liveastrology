@@ -1,0 +1,52 @@
+# External weekly cron that calls the backend's admin dispatch endpoint.
+#
+# This is the production-reliable way to fire the Sunday horoscope — the
+# in-process APScheduler inside server.py remains as a belt-and-braces
+# fallback. Set `ENABLE_SCHEDULER=0` in the backend .env if you want only
+# this workflow to fire.
+#
+# Setup:
+#   1. In GitHub → Settings → Secrets and variables → Actions, add:
+#        - LIVEASTROLOGY_URL           = https://liveastrology.app
+#        - LIVEASTROLOGY_ADMIN_SECRET  = <the ADMIN_SECRET from /app/backend/.env>
+#   2. Push this file on the default branch.
+#   3. Check the Actions tab the next Sunday at 18:00 UTC (or run manually via "Run workflow").
+
+name: Weekly horoscope dispatch
+
+on:
+  schedule:
+    - cron: '0 18 * * 0'   # Sundays 18:00 UTC
+  workflow_dispatch: {}    # manual trigger button in GitHub UI
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/admin/dispatch-weekly
+        env:
+          URL:    ${{ secrets.LIVEASTROLOGY_URL }}
+          SECRET: ${{ secrets.LIVEASTROLOGY_ADMIN_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$URL" ] || [ -z "$SECRET" ]; then
+            echo "::error::Missing LIVEASTROLOGY_URL or LIVEASTROLOGY_ADMIN_SECRET secret"
+            exit 1
+          fi
+
+          response=$(mktemp)
+          code=$(curl -sS -o "$response" -w "%{http_code}" \
+            -X POST "$URL/api/admin/dispatch-weekly" \
+            -H "Authorization: Bearer $SECRET")
+
+          echo "HTTP $code"
+          cat "$response"
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "::error::dispatch failed with HTTP $code"
+            exit 1
+          fi
