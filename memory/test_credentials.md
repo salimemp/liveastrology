@@ -25,16 +25,12 @@ There is **no end-user authentication** in the app.
 
 - API key already set in `/app/backend/.env` (`RESEND_API_KEY`).
 - Domain `liveastrology.app` is verified — sender is `hello@liveastrology.app`.
-- **Webhook signing secret** (`RESEND_WEBHOOK_SECRET`): currently empty.
-  - Configure at https://resend.com/webhooks → add endpoint
-    `https://liveastrology.app/api/webhooks/resend`
-    (or the preview URL above for staging),
-    subscribe to `email.delivered`, `email.bounced`, `email.opened`,
-    `email.clicked`, `email.complained`, copy the `whsec_…` value into
-    `RESEND_WEBHOOK_SECRET`, and restart the backend. The Email Health
-    card on the Admin Dashboard will flip to "Webhook configured".
-  - While the secret is empty, the endpoint accepts unsigned payloads and
-    logs a warning (so you can ingest test events from the Resend UI).
+- **Webhook signing secret** (`RESEND_WEBHOOK_SECRET`): **configured** ✅
+  - Endpoint registered at https://resend.com/webhooks →
+    `https://liveastrology.app/api/webhooks/resend`,
+    subscribed to `email.delivered`, `email.bounced`, `email.opened`,
+    `email.clicked`, `email.complained`. Backend now rejects any unsigned
+    or wrongly-signed payload with HTTP 401.
 
 ## Cloudflare Turnstile
 
