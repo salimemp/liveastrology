@@ -570,3 +570,141 @@ async def test_resend_webhook_accepts_valid_svix_signature(client, monkeypatch):
     stored = await db.email_events.find_one({"email_id": "signed-1"}, {"_id": 0})
     assert stored is not None
     assert stored["type"] == "email.bounced"
+
+
+# ---------- Articles CMS ----------
+
+LONG_CONTENT = ("Hello world. " * 50).strip()  # ~100 words → passes min_length validation
+
+
+async def test_articles_public_list_empty_initially(client):
+    ac, _ = client
+    r = await ac.get("/api/articles")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+async def test_admin_create_article_then_visible_publicly(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "My First Article",
+            "excerpt": "A short summary of the article.",
+            "content": LONG_CONTENT,
+            "author": "Test",
+            "category": "Astrology Basics",
+            "tags": ["test", "first"],
+            "status": "published",
+        },
+    )
+    assert r.status_code == 201, r.text
+    created = r.json()
+    assert created["slug"] == "my-first-article"
+    assert created["read_time"]  # auto-derived
+    assert created["word_count"] >= 100
+
+    # Public list now has 1 item
+    pub = await ac.get("/api/articles")
+    assert pub.status_code == 200
+    assert len(pub.json()) == 1
+    assert pub.json()[0]["slug"] == "my-first-article"
+    # Public list does NOT include full content
+    assert "content" not in pub.json()[0]
+
+    # Public detail returns full content
+    detail = await ac.get("/api/articles/my-first-article")
+    assert detail.status_code == 200
+    assert detail.json()["content"] == LONG_CONTENT
+
+
+async def test_admin_create_article_requires_auth(client):
+    ac, _ = client
+    r = await ac.post("/api/admin/articles", json={
+        "title": "x", "excerpt": "yyyyyyyyyy", "content": LONG_CONTENT,
+        "author": "x", "category": "x",
+    })
+    assert r.status_code == 401
+
+
+async def test_draft_article_hidden_from_public(client):
+    ac, _ = client
+    await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Draft Post",
+            "excerpt": "Draft excerpt only.",
+            "content": LONG_CONTENT,
+            "author": "Editor",
+            "category": "Drafts",
+            "status": "draft",
+        },
+    )
+    pub_list = await ac.get("/api/articles")
+    assert all(a["slug"] != "draft-post" for a in pub_list.json())
+    pub_detail = await ac.get("/api/articles/draft-post")
+    assert pub_detail.status_code == 404
+    # But admin can still see it
+    admin_detail = await ac.get(
+        "/api/admin/articles/draft-post",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert admin_detail.status_code == 200
+    assert admin_detail.json()["status"] == "draft"
+
+
+async def test_slug_collision_appends_suffix(client):
+    ac, _ = client
+    body = lambda: {
+        "title": "Same Title", "excerpt": "Same excerpt blah.", "content": LONG_CONTENT,
+        "author": "x", "category": "x",
+    }
+    r1 = await ac.post("/api/admin/articles", headers={"Authorization": "Bearer test-admin-secret"}, json=body())
+    r2 = await ac.post("/api/admin/articles", headers={"Authorization": "Bearer test-admin-secret"}, json=body())
+    r3 = await ac.post("/api/admin/articles", headers={"Authorization": "Bearer test-admin-secret"}, json=body())
+    slugs = sorted([r1.json()["slug"], r2.json()["slug"], r3.json()["slug"]])
+    assert slugs == ["same-title", "same-title-2", "same-title-3"]
+
+
+async def test_patch_article_updates_fields_and_publishes(client):
+    ac, _ = client
+    await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "To Be Edited", "excerpt": "Will be edited.", "content": LONG_CONTENT,
+            "author": "x", "category": "x", "status": "draft",
+        },
+    )
+    r = await ac.patch(
+        "/api/admin/articles/to-be-edited",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"title": "Edited Title", "status": "published"},
+    )
+    assert r.status_code == 200
+    assert r.json()["title"] == "Edited Title"
+    assert r.json()["status"] == "published"
+    assert r.json()["published_at"] is not None
+
+
+async def test_delete_article(client):
+    ac, _ = client
+    await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Delete Me", "excerpt": "A doomed article.", "content": LONG_CONTENT,
+            "author": "x", "category": "x",
+        },
+    )
+    r = await ac.delete(
+        "/api/admin/articles/delete-me",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert r.status_code == 200
+    # Now 404
+    r2 = await ac.get("/api/articles/delete-me")
+    assert r2.status_code == 404
+

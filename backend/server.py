@@ -29,6 +29,7 @@ Endpoints (all prefixed with /api):
 """
 import logging
 import os
+import re
 import secrets
 import string
 from datetime import datetime, timezone
@@ -722,6 +723,175 @@ _TRACKED_EVENT_TYPES = {
 }
 
 
+# ---------- Articles CMS ----------
+# Long-form blog content lives in MongoDB so contributors can publish from
+# /admin without touching code. The default seed contains the six
+# evergreen articles that ship with the app; admins can add, edit, draft,
+# and publish more from the dashboard.
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(s: str) -> str:
+    s = _SLUG_RE.sub("-", s.lower()).strip("-")
+    return s[:90] or _short_id("post", 6).lower()
+
+
+class ArticleIn(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    excerpt: str = Field(min_length=10, max_length=600)
+    content: str = Field(min_length=100)
+    author: str = Field(min_length=1, max_length=80)
+    category: str = Field(min_length=1, max_length=80)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    read_time: str = Field(default="", max_length=40)
+    status: str = Field(default="published")  # 'draft' | 'published'
+    slug: str | None = None
+
+
+class ArticleUpdate(BaseModel):
+    title: str | None = None
+    excerpt: str | None = None
+    content: str | None = None
+    author: str | None = None
+    category: str | None = None
+    tags: list[str] | None = None
+    read_time: str | None = None
+    status: str | None = None
+
+
+def _article_doc(payload: ArticleIn, slug: str) -> dict[str, Any]:
+    now = _now()
+    word_count = len(re.findall(r"\S+", payload.content))
+    if not payload.read_time:
+        # 220 wpm reading speed, rounded up.
+        minutes = max(1, round(word_count / 220))
+        read_time = f"{minutes} min read"
+    else:
+        read_time = payload.read_time
+    return {
+        "slug": slug,
+        "title": payload.title.strip(),
+        "excerpt": payload.excerpt.strip(),
+        "content": payload.content.strip(),
+        "author": payload.author.strip(),
+        "category": payload.category.strip(),
+        "tags": [t.strip() for t in payload.tags if t.strip()],
+        "read_time": read_time,
+        "word_count": word_count,
+        "status": payload.status if payload.status in {"draft", "published"} else "published",
+        "created_at": now,
+        "updated_at": now,
+        "published_at": now if payload.status == "published" else None,
+    }
+
+
+@app.get("/api/articles")
+async def list_articles_public(limit: int = 50) -> list[dict[str, Any]]:
+    cursor = db.articles.find(
+        {"status": "published"},
+        {"_id": 0, "content": 0},  # excerpts only on the list endpoint
+    ).sort("published_at", -1).limit(min(max(limit, 1), 100))
+    items = []
+    async for doc in cursor:
+        for k in ("created_at", "updated_at", "published_at"):
+            if isinstance(doc.get(k), datetime):
+                doc[k] = doc[k].isoformat()
+        items.append(doc)
+    return items
+
+
+@app.get("/api/articles/{slug}")
+async def get_article_public(slug: str) -> dict[str, Any]:
+    doc = await db.articles.find_one({"slug": slug, "status": "published"}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Article not found")
+    for k in ("created_at", "updated_at", "published_at"):
+        if isinstance(doc.get(k), datetime):
+            doc[k] = doc[k].isoformat()
+    return doc
+
+
+@app.get("/api/admin/articles", dependencies=[Depends(require_admin)])
+async def list_articles_admin() -> list[dict[str, Any]]:
+    cursor = db.articles.find({}, {"_id": 0, "content": 0}).sort("updated_at", -1)
+    items = []
+    async for doc in cursor:
+        for k in ("created_at", "updated_at", "published_at"):
+            if isinstance(doc.get(k), datetime):
+                doc[k] = doc[k].isoformat()
+        items.append(doc)
+    return items
+
+
+@app.get("/api/admin/articles/{slug}", dependencies=[Depends(require_admin)])
+async def get_article_admin(slug: str) -> dict[str, Any]:
+    doc = await db.articles.find_one({"slug": slug}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Article not found")
+    for k in ("created_at", "updated_at", "published_at"):
+        if isinstance(doc.get(k), datetime):
+            doc[k] = doc[k].isoformat()
+    return doc
+
+
+@app.post("/api/admin/articles", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_article(payload: ArticleIn) -> dict[str, Any]:
+    base_slug = _slugify(payload.slug or payload.title)
+    slug = base_slug
+    n = 2
+    while await db.articles.find_one({"slug": slug}, {"_id": 1}):
+        slug = f"{base_slug}-{n}"
+        n += 1
+    doc = _article_doc(payload, slug)
+    await db.articles.insert_one(doc)
+    doc.pop("_id", None)
+    for k in ("created_at", "updated_at", "published_at"):
+        if isinstance(doc.get(k), datetime):
+            doc[k] = doc[k].isoformat()
+    return doc
+
+
+@app.patch("/api/admin/articles/{slug}", dependencies=[Depends(require_admin)])
+async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
+    existing = await db.articles.find_one({"slug": slug}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Article not found")
+    update_fields: dict[str, Any] = {}
+    for field in ("title", "excerpt", "content", "author", "category", "read_time", "status"):
+        v = getattr(patch, field)
+        if v is not None:
+            update_fields[field] = v.strip() if isinstance(v, str) else v
+    if patch.tags is not None:
+        update_fields["tags"] = [t.strip() for t in patch.tags if t.strip()]
+    if patch.content is not None:
+        update_fields["word_count"] = len(re.findall(r"\S+", patch.content))
+        if not (patch.read_time or existing.get("read_time")):
+            minutes = max(1, round(update_fields["word_count"] / 220))
+            update_fields["read_time"] = f"{minutes} min read"
+    if patch.status is not None:
+        if patch.status not in {"draft", "published"}:
+            raise HTTPException(status_code=400, detail="status must be 'draft' or 'published'")
+        if patch.status == "published" and not existing.get("published_at"):
+            update_fields["published_at"] = _now()
+    update_fields["updated_at"] = _now()
+
+    await db.articles.update_one({"slug": slug}, {"$set": update_fields})
+    doc = await db.articles.find_one({"slug": slug}, {"_id": 0})
+    for k in ("created_at", "updated_at", "published_at"):
+        if isinstance(doc.get(k), datetime):
+            doc[k] = doc[k].isoformat()
+    return doc
+
+
+@app.delete("/api/admin/articles/{slug}", dependencies=[Depends(require_admin)])
+async def delete_article(slug: str) -> dict[str, Any]:
+    res = await db.articles.delete_one({"slug": slug})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Article not found")
+    return {"status": "deleted", "slug": slug}
+
+
+# ---------- Resend webhook ingestion ----------
 @app.post("/api/webhooks/resend", status_code=status.HTTP_202_ACCEPTED)
 async def resend_webhook(request: Request) -> dict[str, Any]:
     raw = await request.body()

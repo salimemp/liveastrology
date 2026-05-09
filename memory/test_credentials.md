@@ -1,6 +1,6 @@
 # Live Astrology — admin & integration credentials
 
-> **Updated**: 2026-04-28 (session: Resend webhooks + Email Health card)
+> **Updated**: 2026-05-09 (session: progress bar + home blog previews + Consent Mode v2 + Articles CMS)
 
 ## Admin dashboard (Bearer auth)
 
