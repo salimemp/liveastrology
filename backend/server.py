@@ -736,6 +736,80 @@ def _slugify(s: str) -> str:
     return s[:90] or _short_id("post", 6).lower()
 
 
+# Seed-articles payload — kept inline (not a separate file) so the seed
+# endpoint works on production without needing the migration package
+# inside the deploy bundle.
+_SEED_ARTICLES: list[dict[str, Any]] = [
+    {"title": "Understanding Your Sun Sign: The Core of Your Astrological Identity",
+     "category": "Astrology Basics", "author": "Celestial Insights",
+     "tags": ["sun sign", "zodiac", "astrology basics", "self discovery"],
+     "read_time": "9 min read", "published_at": datetime(2024, 12, 15, tzinfo=timezone.utc)},
+    {"title": "Moon Sign vs Rising Sign: What's the Difference?",
+     "category": "Astrology Basics", "author": "Stellar Guide",
+     "tags": ["moon sign", "rising sign", "ascendant", "birth chart"],
+     "read_time": "11 min read", "published_at": datetime(2024, 12, 10, tzinfo=timezone.utc)},
+    {"title": "How Venus and Mars Influence Your Love Life",
+     "category": "Love & Relationships", "author": "Cosmic Love",
+     "tags": ["venus", "mars", "romance", "compatibility", "love"],
+     "read_time": "12 min read", "published_at": datetime(2024, 12, 5, tzinfo=timezone.utc)},
+    {"title": "Mercury Retrograde: Cycles, Myths, and How to Actually Use Them",
+     "category": "Astrology Basics", "author": "Celestial Insights",
+     "tags": ["mercury", "retrograde", "communication", "astrology cycles"],
+     "read_time": "11 min read", "published_at": datetime(2024, 11, 28, tzinfo=timezone.utc)},
+    {"title": "The 12 Houses of Astrology Explained",
+     "category": "Astrology Basics", "author": "Stellar Guide",
+     "tags": ["houses", "birth chart", "astrology basics", "natal chart"],
+     "read_time": "13 min read", "published_at": datetime(2024, 11, 22, tzinfo=timezone.utc)},
+    {"title": "Saturn Returns: Why Your Late 20s Feel Like a Tear-Down",
+     "category": "Astrology Basics", "author": "Celestial Insights",
+     "tags": ["saturn return", "transits", "life cycles", "astrology basics"],
+     "read_time": "12 min read", "published_at": datetime(2024, 11, 18, tzinfo=timezone.utc)},
+]
+
+
+@app.post("/api/admin/seed-articles", dependencies=[Depends(require_admin)])
+async def seed_articles_endpoint(force: bool = False) -> dict[str, Any]:
+    """One-shot seeder for production. Idempotent: skips when the
+    collection already has documents (unless ``force=true`` is passed,
+    which still avoids slug collisions but seeds the missing ones).
+
+    Usage:
+        curl -X POST -H "Authorization: Bearer $ADMIN" \\
+             https://liveastrology.app/api/admin/seed-articles
+    """
+    existing_count = await db.articles.count_documents({})
+    if existing_count > 0 and not force:
+        return {"status": "skipped", "reason": "articles collection already populated",
+                "existing_count": existing_count, "inserted": 0}
+
+    inserted = 0
+    skipped: list[str] = []
+    for stub in _SEED_ARTICLES:
+        slug = _slugify(stub["title"])
+        if await db.articles.find_one({"slug": slug}, {"_id": 1}):
+            skipped.append(slug)
+            continue
+        published_at: datetime = stub["published_at"]
+        await db.articles.insert_one({
+            "slug": slug,
+            "title": stub["title"],
+            "excerpt": f"Editorial article in the {stub['category']} series. Open the article on the site to read the full text.",
+            "content": f"# {stub['title']}\n\nThis article is currently maintained in the frontend codebase. Edit it via /admin → Articles to publish a database-backed version.",
+            "author": stub["author"],
+            "category": stub["category"],
+            "tags": stub["tags"],
+            "read_time": stub["read_time"],
+            "word_count": 0,
+            "status": "published",
+            "created_at": published_at,
+            "updated_at": published_at,
+            "published_at": published_at,
+        })
+        inserted += 1
+
+    return {"status": "ok", "inserted": inserted, "skipped": skipped, "total_now": existing_count + inserted}
+
+
 class ArticleIn(BaseModel):
     title: str = Field(min_length=3, max_length=200)
     excerpt: str = Field(min_length=10, max_length=600)
