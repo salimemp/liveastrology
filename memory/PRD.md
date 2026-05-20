@@ -2,7 +2,7 @@
 
 > **Repo**: `/app/liveastrology` (React 18 + Vite + TS, symlinked as `/app/frontend`)
 > **Backend**: `/app/backend` (FastAPI + MongoDB + Resend)
-> **Preview**: https://cosmic-admin-live.preview.emergentagent.com
+> **Preview**: https://marketing-audit-impl.preview.emergentagent.com
 > **Response language**: English only
 
 ---

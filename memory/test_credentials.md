@@ -7,13 +7,13 @@
 The admin UI at `/admin` and all `/api/admin/*` HTTP endpoints are protected
 by a shared-secret bearer token read from `ADMIN_SECRET` in `/app/backend/.env`.
 
-- **URL**: `https://cosmic-admin-live.preview.emergentagent.com/admin`
+- **URL**: `https://marketing-audit-impl.preview.emergentagent.com/admin`
 - **Secret**: `W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5`
 
 Example curl:
 
     curl -H "Authorization: Bearer W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5" \
-         https://cosmic-admin-live.preview.emergentagent.com/api/admin/stats
+         https://marketing-audit-impl.preview.emergentagent.com/api/admin/stats
 
 This secret was rotated to a 48-char `secrets.token_urlsafe(36)` value on
 2026-04-28. Rotate again before/after handing the project to a new owner
