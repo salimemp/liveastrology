@@ -771,3 +771,55 @@ async def test_interpret_returns_503_on_runtime_error(client, monkeypatch):
     r = await ac.post("/api/interpret", json={"sun": "Leo", "moon": "Scorpio", "rising": "Cancer"})
     assert r.status_code == 503
     assert "LLM down" in r.json()["detail"]
+
+
+# ---------- SEO seed articles (Phase 2 of marketing audit) ----------
+async def test_seed_seo_articles_inserts_five(client):
+    ac, mock_db = client
+    r = await ac.post(
+        "/api/admin/seed-seo-articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert len(body["inserted"]) == 5
+    # All 5 should be queryable on the public endpoint with >1000 word counts.
+    listing = await ac.get("/api/articles?limit=20")
+    assert listing.status_code == 200
+    items = listing.json()
+    slugs = {a["slug"] for a in items}
+    assert "what-does-moon-in-scorpio-mean-a-plain-english-guide" in slugs
+    assert "sun-sign-vs-moon-sign-vs-rising-sign-which-one-actually-matters" in slugs
+    for a in items:
+        if a["slug"] in body["inserted"]:
+            assert a["word_count"] > 1000
+
+
+async def test_seed_seo_articles_is_idempotent(client):
+    ac, _ = client
+    r1 = await ac.post("/api/admin/seed-seo-articles", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r1.status_code == 200
+    assert len(r1.json()["inserted"]) == 5
+    r2 = await ac.post("/api/admin/seed-seo-articles", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r2.status_code == 200
+    body = r2.json()
+    assert body["inserted"] == []
+    assert len(body["skipped"]) == 5
+
+
+async def test_seed_seo_articles_force_updates(client):
+    ac, _ = client
+    await ac.post("/api/admin/seed-seo-articles", headers={"Authorization": "Bearer test-admin-secret"})
+    r = await ac.post("/api/admin/seed-seo-articles?force=true", headers={"Authorization": "Bearer test-admin-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["updated"]) == 5
+    assert body["inserted"] == []
+
+
+async def test_seed_seo_articles_requires_auth(client):
+    ac, _ = client
+    r = await ac.post("/api/admin/seed-seo-articles")
+    assert r.status_code == 401
+

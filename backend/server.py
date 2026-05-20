@@ -862,6 +862,57 @@ async def seed_articles_endpoint(force: bool = False) -> dict[str, Any]:
     return {"status": "ok", "inserted": inserted, "skipped": skipped, "total_now": existing_count + inserted}
 
 
+@app.post("/api/admin/seed-seo-articles", dependencies=[Depends(require_admin)])
+async def seed_seo_articles_endpoint(force: bool = False) -> dict[str, Any]:
+    """Insert the 5 long-form SEO articles (Moon in Scorpio, Big Three
+    comparison, no-signup positioning, beginner birth-chart guides) into
+    the Articles CMS. Idempotent by slug — re-running this endpoint
+    skips articles that already exist. ``force=true`` will overwrite the
+    existing rows with the latest copy from ``seo_articles.py``.
+    """
+    from seo_articles import SEO_ARTICLES  # local import for hot-reload friendliness
+
+    inserted: list[str] = []
+    updated: list[str] = []
+    skipped: list[str] = []
+    for art in SEO_ARTICLES:
+        slug = _slugify(art["title"])
+        existing = await db.articles.find_one({"slug": slug}, {"_id": 1})
+        word_count = len(re.findall(r"\S+", art["content"]))
+        doc = {
+            "slug": slug,
+            "title": art["title"],
+            "excerpt": art["excerpt"],
+            "content": art["content"],
+            "author": art["author"],
+            "category": art["category"],
+            "tags": art["tags"],
+            "read_time": art["read_time"],
+            "word_count": word_count,
+            "status": "published",
+            "published_at": art["published_at"],
+            "updated_at": _now(),
+        }
+        if existing and not force:
+            skipped.append(slug)
+            continue
+        if existing and force:
+            await db.articles.update_one({"slug": slug}, {"$set": doc})
+            updated.append(slug)
+        else:
+            doc["created_at"] = art["published_at"]
+            await db.articles.insert_one(doc)
+            inserted.append(slug)
+
+    return {
+        "status": "ok",
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "total_now": await db.articles.count_documents({}),
+    }
+
+
 class ArticleIn(BaseModel):
     title: str = Field(min_length=3, max_length=200)
     excerpt: str = Field(min_length=10, max_length=600)
