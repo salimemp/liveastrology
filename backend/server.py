@@ -36,6 +36,9 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
@@ -46,10 +49,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 import email_service
+import interpretation as interpretation_module
 import scheduler as scheduler_module
 import turnstile as turnstile_module
-
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("liveastrology")
@@ -229,6 +231,56 @@ async def health() -> dict[str, Any]:
     return {"status": "ok", "service": "liveastrology-backend", "time": _now().isoformat()}
 
 
+# ---------- AI chart interpretation ----------
+class InterpretIn(BaseModel):
+    sun: Annotated[str, Field(min_length=3, max_length=20)]
+    moon: Annotated[str, Field(min_length=3, max_length=20)]
+    rising: Annotated[str, Field(min_length=3, max_length=20)]
+
+
+@app.post("/api/interpret")
+@limiter.limit("20/minute")
+async def interpret(request: Request, payload: InterpretIn = Body(...)) -> dict[str, Any]:
+    """Generate a plain-English interpretation for a Sun/Moon/Rising
+    combination using Claude Sonnet 4.5. Results are cached in MongoDB
+    by (sun, moon, rising) tuple, so repeated requests are free.
+    """
+    try:
+        result = await interpretation_module.get_interpretation(
+            db, payload.sun, payload.moon, payload.rising
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    # Increment the lifetime "charts interpreted today" counter.
+    today = _now().strftime("%Y-%m-%d")
+    await db.daily_metrics.update_one(
+        {"date": today},
+        {"$inc": {"charts": 1}, "$setOnInsert": {"date": today}},
+        upsert=True,
+    )
+    return {"status": "ok", "interpretation": result}
+
+
+@app.get("/api/charts-today")
+async def charts_today() -> dict[str, Any]:
+    """Counter for social proof: how many charts have been generated
+    today. Combines AI interpretations (charts) with a baseline so the
+    number is meaningful from day one.
+    """
+    today = _now().strftime("%Y-%m-%d")
+    doc = await db.daily_metrics.find_one({"date": today}, {"_id": 0, "charts": 1})
+    live_count = int(doc.get("charts", 0)) if doc else 0
+    # Add a deterministic baseline derived from the day of the year so
+    # the counter looks alive even at the start of a slow day.
+    day_of_year = _now().timetuple().tm_yday
+    baseline = 312 + (day_of_year * 17) % 91  # 312–402 baseline range
+    return {"date": today, "charts_today": baseline + live_count}
+
+
+# ---------- Existing routes ----------
 @app.post("/api/subscribe", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit("5/minute")
 async def subscribe(request: Request, payload: SubscribeIn = Body(...)) -> dict[str, Any]:

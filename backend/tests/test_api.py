@@ -708,3 +708,66 @@ async def test_delete_article(client):
     r2 = await ac.get("/api/articles/delete-me")
     assert r2.status_code == 404
 
+
+
+
+# ---------- AI interpretation + charts-today counter ----------
+async def test_charts_today_returns_baseline(client):
+    """Counter should return a positive integer even with zero real charts."""
+    ac, _ = client
+    r = await ac.get("/api/charts-today")
+    assert r.status_code == 200
+    data = r.json()
+    assert "date" in data
+    assert isinstance(data["charts_today"], int)
+    assert data["charts_today"] > 0
+
+
+async def test_interpret_validates_signs(client):
+    """Invalid zodiac sign names should return 422 (Pydantic) or 422 from module."""
+    ac, _ = client
+    r = await ac.post("/api/interpret", json={"sun": "Banana", "moon": "Pisces", "rising": "Leo"})
+    assert r.status_code == 422
+
+
+async def test_interpret_uses_module_and_increments_counter(client, monkeypatch):
+    """The /api/interpret endpoint delegates to interpretation.get_interpretation
+    and bumps the daily counter on success."""
+    import interpretation
+
+    async def fake_get(db, sun, moon, rising):
+        return {
+            "sun":    f"Mock {sun.capitalize()} reading.",
+            "moon":   f"Mock {moon.capitalize()} reading.",
+            "rising": f"Mock {rising.capitalize()} reading.",
+        }
+
+    monkeypatch.setattr(interpretation, "get_interpretation", fake_get)
+
+    ac, _ = client
+    before = (await ac.get("/api/charts-today")).json()["charts_today"]
+
+    r = await ac.post("/api/interpret", json={"sun": "Aries", "moon": "Taurus", "rising": "Gemini"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["interpretation"]["sun"] == "Mock Aries reading."
+
+    after = (await ac.get("/api/charts-today")).json()["charts_today"]
+    assert after == before + 1
+
+
+async def test_interpret_returns_503_on_runtime_error(client, monkeypatch):
+    """If the underlying interpretation module raises RuntimeError, the API
+    surfaces a 503 instead of a 500."""
+    import interpretation
+
+    async def fail(db, sun, moon, rising):
+        raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(interpretation, "get_interpretation", fail)
+
+    ac, _ = client
+    r = await ac.post("/api/interpret", json={"sun": "Leo", "moon": "Scorpio", "rising": "Cancer"})
+    assert r.status_code == 503
+    assert "LLM down" in r.json()["detail"]

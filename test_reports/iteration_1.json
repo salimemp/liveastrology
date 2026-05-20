@@ -1,0 +1,59 @@
+{
+  "summary": "Full e2e testing of Live Astrology Phase 1 marketing changes. Backend: all 46 pytest tests pass (mongomock + monkeypatched interpretation). Real preview API tested: POST /api/interpret returns {sun,moon,rising} paragraphs (~650-770 chars each), invalid sign -> 422, cache hits return identical text in ~0.2s vs ~13.5s first call, and GET /api/charts-today increments by 1 after each new interpret. Frontend: Home shows new hero title, TrustStrip with charts counter (332) + 3 promise pills, cookie banner. /birth-chart form fills + nominatim suggestion picker works; results render Sign cards, ai-interpretation-section (with all three ai-interp-* paragraphs from Claude), shareable-result-card with LIVE ASTROLOGY branding + share/copy btns, post-chart-email-capture + input + submit. All required data-testids present. No JS console errors except expected /api/subscribe 403 (Turnstile required in prod).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "PostChartEmailCapture success state",
+        "issue": "Cannot verify post-chart-email-success E2E through preview URL because TURNSTILE_DISABLED=0 in production and /api/subscribe returns 403 'Human verification failed — please retry.' The component DOES surface this server error inline (visible text 'Human verification failed — please retry.'), but the Turnstile widget itself is not visibly rendering an iframe in the capture, so the user has no way to complete verification. Was flagged in the original task brief.",
+        "affected_selectors": ["[data-testid=\"post-chart-email-submit\"]", "[data-testid=\"post-chart-email-success\"]"]
+      },
+      {
+        "flow": "PostChartEmailCapture invalid-email handling",
+        "issue": "Invalid email path relies on browser-native HTML5 validation (`<input type=\"email\" required>` triggers browser tooltip e.g. 'Please include an @ in the email address'). No custom in-app error element is rendered, so testing the 'shows error message' spec is technically satisfied only via the native tooltip. Acceptable but inconsistent with rest of the site's styling.",
+        "affected_selectors": ["[data-testid=\"post-chart-email-input\"]"]
+      },
+      {
+        "flow": "AI interpretation section heading",
+        "issue": "Task brief expected a visible 'PLAIN-ENGLISH READING' label inside [data-testid=\"ai-interpretation-section\"]. Actual visible heading is 'What Your Big Three Actually Mean' (no occurrence of 'PLAIN-ENGLISH READING' anywhere on page). data-testid is present; only the copy differs from the spec.",
+        "affected_selectors": ["[data-testid=\"ai-interpretation-section\"]"]
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "/birth-chart results — Elements + Modalities widget",
+        "issues": ["Modality percentages are out of range — visible values 'Initiative 1100%', 'Adaptability 2233%' (likely a missing /3 normalization or wrong denominator in ElementBreakdown component). Unrelated to Phase 1 changes but visible on the same results page; flagging as a high-priority pre-existing data bug."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Decide whether the 'PLAIN-ENGLISH READING' label is required text (spec) or if 'What Your Big Three Actually Mean' is the intended final copy — align UI or spec.",
+    "Either enable a Turnstile widget render in PostChartEmailCapture (so users can complete verification in production) or auto-include the Turnstile token client-side. As-is, valid-email submission ALWAYS fails with 403 in the preview/production environment.",
+    "Add a styled inline error message in PostChartEmailCapture for client-side invalid email instead of relying solely on browser-native validation.",
+    "Fix percentage calculation in Elements/Modalities widget on the results page (values like 1100% / 2233% are obviously wrong).",
+    "Optional: add data-testid attributes to birth-chart form inputs (name/date/time/location) for more stable testing."
+  ],
+  "critical_code_review_comments": [
+    "interpretation.py: solid — caches by (sun,moon,rising) key, validates input, lazy-imports emergentintegrations, parses JSON tolerantly, persists with timestamp + model name, and never returns Mongo _id.",
+    "server.py /api/interpret: increments counter only after a successful interpretation — correct ordering.",
+    "ShareableResultCard, TrustStrip, AiInterpretation, PostChartEmailCapture all carry the requested data-testids — good testability.",
+    "PostChartEmailCapture surfaces backend 403 error inline rather than failing silently — good. However the Turnstile flow is broken end-to-end in production.",
+    "Pre-existing: ElementBreakdown / modality percentages clearly compute over wrong denominator — produces >100% values. Recommend a quick audit even though it predates this iteration."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "90%"},
+  "test_credentials": "Admin Bearer secret read from /app/memory/test_credentials.md (W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5). No admin endpoints needed for Phase 1 verification.",
+  "seed_data_creation": "Created two real LLM-backed cache entries by hitting POST /api/interpret on the preview URL: (aries,cancer,virgo) and (leo,pisces,sagittarius), plus (gemini,pisces,libra) via the UI flow (Ada / 1990-06-15 / 14:30 / Greater London). All persisted in db.interpretation_cache and increment charts_today.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest suite is healthy (46/46). For frontend retest, use Ada / 1990-06-15 / 14:30 and type 'London' in the city search then click the first suggestion 'Greater London' — it requires picking a Nominatim suggestion (not just typing). The post-chart email success path cannot be exercised through the preview URL until Turnstile is fixed; expect /api/subscribe -> 403. Sun/Moon/Rising for that DOB/Time/London is Gemini/Pisces/Libra.",
+  "rca of the issue": "PostChartEmailCapture 403: TURNSTILE_DISABLED=0 in production .env and POST /api/subscribe requires a valid Cloudflare Turnstile token in the request body. The PostChartEmailCapture component does not render the Turnstile widget (no iframe[src*='challenges.cloudflare'] mounted inside [data-testid='post-chart-email-capture']), so no token is collected and the backend rejects every submission with 'Human verification failed'. Fix: either mount the Turnstile <script> + widget div inside the capture component (reuse existing footer subscribe widget pattern), or whitelist /api/subscribe from the post-chart context server-side."
+}
