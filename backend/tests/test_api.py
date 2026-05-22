@@ -823,3 +823,159 @@ async def test_seed_seo_articles_requires_auth(client):
     r = await ac.post("/api/admin/seed-seo-articles")
     assert r.status_code == 401
 
+
+
+# ---------- Billing / Premium subscription (Phase 3) ----------
+async def test_billing_packages_returns_two_plans(client):
+    ac, _ = client
+    r = await ac.get("/api/billing/packages")
+    assert r.status_code == 200
+    data = r.json()
+    ids = {p["id"] for p in data["packages"]}
+    assert ids == {"monthly", "yearly"}
+    monthly = next(p for p in data["packages"] if p["id"] == "monthly")
+    yearly  = next(p for p in data["packages"] if p["id"] == "yearly")
+    assert monthly["amount"] == 4.99
+    assert yearly["amount"] == 39.0
+
+
+async def test_billing_status_for_unknown_email_returns_inactive(client):
+    ac, _ = client
+    r = await ac.get("/api/billing/status?email=nobody@example.com")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["active"] is False
+    assert data["plan"] is None
+    assert data["expires_at"] is None
+
+
+async def test_billing_checkout_validates_package(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/billing/checkout",
+        json={"package_id": "lifetime", "email": "x@y.com", "origin_url": "https://t.example"},
+    )
+    assert r.status_code == 422  # Pydantic Literal rejection
+
+
+async def test_billing_checkout_validates_email(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/billing/checkout",
+        json={"package_id": "monthly", "email": "not-an-email", "origin_url": "https://t.example"},
+    )
+    assert r.status_code == 422
+
+
+async def test_billing_checkout_creates_pending_transaction(client, monkeypatch):
+    """Mock Stripe so we can verify the pending payment_transactions row
+    is written before the redirect URL is returned."""
+    import billing
+
+    class _FakeSession:
+        url = "https://stripe.test/checkout"
+        session_id = "cs_test_fake_123"
+
+    class _FakeCheckout:
+        def __init__(self, *a, **kw): pass
+        async def create_checkout_session(self, req): return _FakeSession()
+
+    monkeypatch.setattr(billing, "STRIPE_API_KEY", "sk_test_fake")
+
+    # Patch the import inside the create function. emergentintegrations
+    # may not be importable in CI, so we need to satisfy the import
+    # statement by injecting a fake module first.
+    import sys
+    import types
+    fake_root = types.ModuleType("emergentintegrations")
+    fake_payments = types.ModuleType("emergentintegrations.payments")
+    fake_stripe = types.ModuleType("emergentintegrations.payments.stripe")
+    fake_checkout_mod = types.ModuleType("emergentintegrations.payments.stripe.checkout")
+    fake_checkout_mod.StripeCheckout = _FakeCheckout
+    class _FakeRequest:
+        def __init__(self, **kw): pass
+    fake_checkout_mod.CheckoutSessionRequest = _FakeRequest
+    sys.modules["emergentintegrations"] = fake_root
+    sys.modules["emergentintegrations.payments"] = fake_payments
+    sys.modules["emergentintegrations.payments.stripe"] = fake_stripe
+    sys.modules["emergentintegrations.payments.stripe.checkout"] = fake_checkout_mod
+
+    ac, mock_db = client
+    r = await ac.post(
+        "/api/billing/checkout",
+        json={"package_id": "monthly", "email": "buyer@example.com", "origin_url": "https://app.test"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["url"] == "https://stripe.test/checkout"
+    assert data["session_id"] == "cs_test_fake_123"
+
+    txn = await mock_db.payment_transactions.find_one({"session_id": "cs_test_fake_123"}, {"_id": 0})
+    assert txn is not None
+    assert txn["status"] == "initiated"
+    assert txn["payment_status"] == "unpaid"
+    assert txn["email"] == "buyer@example.com"
+    assert txn["amount"] == 4.99
+
+
+async def test_billing_grants_entitlement_on_paid_status(client, monkeypatch):
+    """Once Stripe reports payment_status=paid, the entitlement row is
+    created and /api/billing/status flips to active."""
+    import billing
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(billing, "STRIPE_API_KEY", "sk_test_fake")
+
+    ac, mock_db = client
+    # Seed a pending transaction by calling DB directly (bypasses Stripe).
+    await mock_db.payment_transactions.insert_one({
+        "session_id": "cs_test_paid_1",
+        "email": "vip@example.com",
+        "package_id": "yearly",
+        "plan_label": "Premium Yearly",
+        "amount": 39.0,
+        "currency": "usd",
+        "days": 365,
+        "status": "open",
+        "payment_status": "unpaid",
+        "metadata": {},
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    })
+
+    class _FakeStatus:
+        status = "complete"
+        payment_status = "paid"
+        amount_total = 3900
+        currency = "usd"
+        metadata = {}
+
+    class _FakeCheckout:
+        def __init__(self, *a, **kw): pass
+        async def get_checkout_status(self, sid): return _FakeStatus()
+
+    import sys
+    fake_mod = sys.modules.get("emergentintegrations.payments.stripe.checkout")
+    if fake_mod is None:
+        import types
+        fake_mod = types.ModuleType("emergentintegrations.payments.stripe.checkout")
+        sys.modules["emergentintegrations.payments.stripe.checkout"] = fake_mod
+    fake_mod.StripeCheckout = _FakeCheckout
+
+    r = await ac.get("/api/billing/checkout/status/cs_test_paid_1")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["payment_status"] == "paid"
+    assert data["granted"] is not None
+    assert data["granted"]["plan"] == "yearly"
+
+    status = await ac.get("/api/billing/status?email=vip@example.com")
+    body = status.json()
+    assert body["active"] is True
+    assert body["plan"] == "yearly"
+
+    # Polling again must not double-grant.
+    r2 = await ac.get("/api/billing/checkout/status/cs_test_paid_1")
+    assert r2.status_code == 200
+    assert r2.json()["granted"] is None
+

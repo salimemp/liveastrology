@@ -1,0 +1,36 @@
+{
+  "summary": "Phase 3 (PWA + GEO + Stripe Freemium) — all 18 acceptance criteria pass. Backend pytest 56/56 green (0.62s). Live preview API exercised via curl: GET /api/billing/packages returns the two fixed plans (monthly $4.99/30d, yearly $39/365d); GET /api/billing/status?email=unknown returns {active:false, plan:null, expires_at:null}; POST /api/billing/checkout with package_id='lifetime' returns 422 (Pydantic Literal); POST with email 'not-an-email' returns 422; GET /api/billing/checkout/status/cs_nonexistent returns 404 'Unknown session id'; POST /api/webhook/stripe returns 200 even on rejected signature (logs and returns {status:'rejected', reason}); a real call with package_id='monthly' + valid email returns a genuine https://checkout.stripe.com/c/pay/cs_test_… URL and a session_id (no real payment submitted). Frontend: /upgrade renders H1 'Go Deeper Into Your Chart', both data-testid='upgrade-plan-monthly' and 'upgrade-plan-yearly' cards visible, yearly card carries 'Save 35%' badge, email input + checkout button present; clicking Continue with a valid email POSTs /api/billing/checkout (network log shows 200) and the browser navigates to checkout.stripe.com (verified via page.url). /upgrade?cancelled=1 shows data-testid='upgrade-cancelled-banner'. /upgrade/manage email lookup for an unknown address surfaces data-testid='upgrade-manage-result-none' ('No active premium for this email'). GEO pages render correct localised H1s ('Calcula tu Carta Natal Gratis', 'Calcule seu Mapa Astral Gratuitamente', 'अपनी मुफ्त जन्म कुंडली बनाएँ') and both top+bottom CTAs are present with correct data-testids; ES top CTA navigates to /birth-chart. PWA: /manifest.webmanifest 200 application/manifest+json with name/short_name/icons/start_url/display=standalone/theme_color=#40e0d0; /sw.js 200 application/javascript (1644 bytes); /icon-192.svg and /icon-512.svg both 200 image/svg+xml; index.html includes <link rel='manifest' href='/manifest.webmanifest'>. Service worker registers cleanly — after a reload, navigator.serviceWorker.controller is non-null and registration.active.scriptURL points to /sw.js with scope '/'. Regression: homepage H1 'Free Birth Chart — Sun, Moon & Rising, Explained' loads, /birth-chart form renders, no console errors observed across the new pages.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "/birth-chart and any page using date/time inputs",
+        "issues": ["Date of Birth and Time of Birth fields use the browser-default <input type='date'>/<input type='time'> pickers instead of a shadcn calendar/clock component. This is pre-existing (not introduced in Phase 3) but worth flagging — visual quality and cross-browser consistency would improve with a shadcn DatePicker."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "billing.py is well-scoped: server-side fixed PACKAGES dict (frontend cannot inject amounts); idempotent _grant_entitlement via last_session_id check; tz-aware datetime handling with mongomock fallback. No _id leakage in any response (all reads use {'_id': 0} projection).",
+    "Pydantic Literal['monthly','yearly'] correctly enforced — invalid package_id surfaces 422 at the schema layer before reaching billing.py (good defence in depth).",
+    "POST /api/webhook/stripe returns HTTP 200 even when the signature can't be verified ({status:'rejected', reason}) — this is intentional per the comment in handle_webhook ('In dev/test we accept unsigned payloads, but log loudly') and matches the review_request brief. Before going to production with real Stripe webhooks, switch to returning 401 on verification failure to avoid silent acceptance of forged events. Track this as a hardening task.",
+    "PWA manifest correctly declares display=standalone, theme_color=#40e0d0 (matches brand turquoise), and shortcuts to /birth-chart — installable on Android/desktop Chrome. Icons are SVG (image/svg+xml) which Chrome accepts but iOS Safari traditionally prefers PNG; consider adding raster fallbacks for iOS A2HS quality.",
+    "Service worker registration is gated inside PwaInstallPrompt.tsx and verified to fire on first paint — second navigation has navigator.serviceWorker.controller set, confirming activation.",
+    "GEO landing pages share a single GeoLandingPage.tsx component driven by /lib/geoPages.ts configs — clean DRY. Each locale has unique data-testids (geo-{es,pt,hi}-cta-{top,bottom}) so analytics + tests can disambiguate.",
+    "UpgradePage.tsx uses REACT_APP_BACKEND_URL via process.env (no hardcoded host) and surfaces network errors via toast/state — matches the project conventions."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "100%", "frontend": "100%" },
+  "test_credentials": "Admin Bearer secret read from /app/memory/test_credentials.md (not needed for Phase 3 endpoints — billing routes are public-by-email, no auth). Stripe test key sk_test_emergent already configured in /app/backend/.env.",
+  "seed_data_creation": "Two payment_transactions rows created in the live preview Mongo as a side-effect of the curl checkout test (sessions cs_test_a1jxxW7… and cs_test_a1GJgagOyAdC… for buyer-test-001/002@example.com, status='initiated', payment_status='unpaid'). These are harmless test artefacts; can be cleaned up with db.payment_transactions.deleteMany({email: /^buyer-test-/}) if desired. No entitlements were granted (no real payments).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 3 verified end-to-end. To re-run: (1) backend pytest is `cd /app/backend && python -m pytest tests/ -v`; (2) Stripe checkout test goes against the real Stripe test API via sk_test_emergent — do NOT actually complete a payment, just verify the redirect URL contains 'checkout.stripe.com'; (3) The /upgrade Continue button does a real navigation (window.location.assign) so wrap clicks with a navigation-listener or read page.url after a 4s wait; (4) Service worker only sets navigator.serviceWorker.controller AFTER a reload — first visit registers it but the SAME page is uncontrolled; (5) GEO pages have their own data-testids per locale; (6) The webhook intentionally returns 200 on bad signature in dev — flag this before flipping to prod-grade STRIPE_WEBHOOK_SECRET.",
+  "rca of the issue": "N/A — no bugs found. One pre-existing design observation (browser-default date/time pickers on /birth-chart) was carried forward but is out of scope for Phase 3."
+}

@@ -48,6 +48,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import billing as billing_module
 import email_service
 import interpretation as interpretation_module
 import scheduler as scheduler_module
@@ -278,6 +279,64 @@ async def charts_today() -> dict[str, Any]:
     day_of_year = _now().timetuple().tm_yday
     baseline = 312 + (day_of_year * 17) % 91  # 312–402 baseline range
     return {"date": today, "charts_today": baseline + live_count}
+
+
+
+# ---------- Billing / Premium subscription ----------
+class CheckoutIn(BaseModel):
+    package_id: Annotated[Literal["monthly", "yearly"], Field()]
+    email: EmailStr
+    origin_url: Annotated[str, Field(min_length=8, max_length=200)]
+
+
+@app.get("/api/billing/packages")
+async def billing_packages() -> dict[str, Any]:
+    """Server-side fixed packages. Frontend renders these — but the
+    amount is always trusted from this endpoint, never from a form."""
+    return {
+        "packages": [
+            {"id": pid, **{k: v for k, v in pkg.items()}}
+            for pid, pkg in billing_module.PACKAGES.items()
+        ]
+    }
+
+
+@app.post("/api/billing/checkout")
+@limiter.limit("5/minute")
+async def billing_checkout(request: Request, payload: CheckoutIn = Body(...)) -> dict[str, Any]:
+    try:
+        return await billing_module.create_checkout_session(
+            db,
+            package_id=payload.package_id,
+            email=str(payload.email),
+            origin_url=payload.origin_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/billing/checkout/status/{session_id}")
+async def billing_checkout_status(session_id: str) -> dict[str, Any]:
+    try:
+        return await billing_module.get_checkout_status(db, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/billing/status")
+async def billing_status(email: str) -> dict[str, Any]:
+    return await billing_module.get_entitlement(db, email)
+
+
+@app.post("/api/webhook/stripe")
+async def stripe_webhook(request: Request) -> dict[str, Any]:
+    raw = await request.body()
+    signature = request.headers.get("Stripe-Signature") or request.headers.get("stripe-signature")
+    return await billing_module.handle_webhook(db, raw, signature)
 
 
 # ---------- Existing routes ----------
