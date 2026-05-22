@@ -85,6 +85,14 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-05-22 · Session 2j · Marketing audit — Phase 3 (PWA, GEO landings, Stripe Freemium)
+- ✅ **Stripe Freemium** — email-based subscription lookup (no full auth system per user choice 1c). New `billing.py` module with server-side fixed packages (`monthly` $4.99/30d, `yearly` $39/365d). Endpoints: `GET /api/billing/packages`, `POST /api/billing/checkout`, `GET /api/billing/checkout/status/{id}`, `GET /api/billing/status?email=`, `POST /api/webhook/stripe`. Two new collections: `payment_transactions` (one row per Checkout session, idempotent via `last_session_id`) and `entitlements` (one row per email with `expires_at`).
+- ✅ **Frontend `/upgrade`, `/upgrade/success`, `/upgrade/manage`** — plan selector with "Save 35%" badge on yearly, email field, Stripe redirect, polling success page (6 attempts × 2s), email-lookup status page. Premium feature list: full 10-planet chart, monthly forecast emails, premium compatibility report, priority AI interpretation, cancel anytime.
+- ✅ **PWA** — manifest.webmanifest, sw.js (stale-while-revalidate cache for app shell, network-only for `/api/*`), icon-192.svg + icon-512.svg, `<link rel="manifest">` in index.html, `<PwaInstallPrompt>` component (registers SW + non-intrusive bottom-left install banner with localStorage dismissal). Apple meta tags already present.
+- ✅ **3 GEO landing pages** — `/es/carta-natal` (Spanish), `/pt/mapa-astral` (Portuguese), `/hi/janam-kundali` (Hindi). Reusable `<GeoLandingPage>` driven by `lib/geoPages.ts` configs. Each page: localised hero + Big-Three feature cards + promises strip + 4-paragraph long-form intro + 3 FAQ entries (also wired into FAQPage JSON-LD) + dual CTA → `/birth-chart`. `<html lang>` updated per route.
+- ✅ Test suite grew to **56 tests** (was 50) — 6 new billing tests (packages, status-unknown, checkout-validation, checkout-creates-pending-row, checkout-grants-entitlement-on-paid, idempotent-double-poll). All green.
+- ✅ Testing agent verification: 100% backend + 100% frontend, all 18 acceptance criteria pass, zero issues. Two minor follow-ups flagged for future hardening (see Roadmap).
+
 ### 2026-05-20 · Session 2i · Marketing audit — Phase 2 (SEO content, VS/Alternatives pages, HowTo schema, synastry share card)
 - ✅ **5 long-form SEO articles** seeded into the Articles CMS via new `POST /api/admin/seed-seo-articles` endpoint. Each article is 1,000+ words (1118–1547), targets a high-intent search query, and contains internal links to `/birth-chart` and `/synastry`:
   - `what-does-moon-in-scorpio-mean-a-plain-english-guide` (1202w)
@@ -254,11 +262,18 @@ never surface to the user (the API always responds 202).
 - ✅ Enrich JSON-LD — *shipped 2026-05-20 (HowTo on calculators; Article schema already existed on blog posts)*
 - ✅ Synastry social-share + cards — *shipped 2026-05-20*
 
-### P2 — Marketing audit Phase 3 (strategic, next session)
-- PWA: manifest + service worker, install prompt, push notifications.
-- Freemium tier ($4.99/mo, $39/yr) — Stripe checkout for full 10‑planet natal report, monthly forecasts, compatibility reports.
-- GEO expansion — Spanish `carta natal gratis`, Portuguese `mapa astral gratuito`, Hindi `janam kundali` landing pages.
+### P2 — Marketing audit Phase 3 (strategic) — ✅ shipped 2026-05-22 session 2j
+- ✅ PWA: manifest + service worker + install prompt (push notifications deferred per user choice)
+- ✅ Freemium tier ($4.99/mo, $39/yr) — Stripe Checkout, email-based entitlement lookup
+- ✅ GEO expansion — Spanish `/es/carta-natal`, Portuguese `/pt/mapa-astral`, Hindi `/hi/janam-kundali`
 - Social media launch — TikTok + Instagram (operational, not engineering).
+
+### P1 — Production hardening for Premium (next session)
+- 🔒 **Stripe webhook signature verification**: currently returns 200 on bad signature in dev. Set `STRIPE_WEBHOOK_SECRET` and switch to 401 before flipping to a real Stripe account.
+- 📧 **Premium fulfilment**: wire Resend templates for (a) 10-planet PDF report on activation, (b) monthly forecast email, (c) premium compatibility report on demand.
+- 🍎 **iOS PWA icons**: add raster PNG fallbacks (iOS prefers PNG for A2HS over SVG).
+- 🔁 **Stripe true subscriptions**: swap one-time charges for Stripe Subscriptions + Customer Portal once a real Stripe account is connected.
+- 🚀 **Push notifications**: deferred from Phase 3 — needs VAPID keys + opt-in UI + push library.
 
 ### P2 — Backlog
 - Placidus / Koch / Equal house system options (whole-sign is live now; others are larger due to polar-latitude edge cases).
