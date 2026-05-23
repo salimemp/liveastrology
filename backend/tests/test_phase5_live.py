@@ -11,7 +11,7 @@ import os
 import time
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://marketing-audit-impl.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://forecast-cron-debug.preview.emergentagent.com").rstrip("/")
 ADMIN_SECRET = "W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5"
 ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_SECRET}"}
 

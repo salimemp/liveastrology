@@ -4,7 +4,7 @@ import time
 import uuid
 import requests
 
-BASE = "https://marketing-audit-impl.preview.emergentagent.com"
+BASE = "https://forecast-cron-debug.preview.emergentagent.com"
 ADMIN = "W1X1H6anmZ0M9vUSMr9kv7BVsCS6uFVnay7Lbl8aVsWanBh5"
 
 
