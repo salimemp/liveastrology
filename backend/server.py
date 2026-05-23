@@ -54,6 +54,7 @@ import compatibility_reports as compatibility_module
 import email_service
 import forecast as forecast_module
 import interpretation as interpretation_module
+import review_requests as review_requests_module
 import scheduler as scheduler_module
 import turnstile as turnstile_module
 
@@ -484,6 +485,31 @@ async def admin_forecast_preview(force: bool = False) -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return {"status": "ok", "forecast": forecast}
+
+
+# ---------- Premium: Day-60 review-ask dispatch (admin / cron) ----------
+class ReviewRequestDispatchIn(BaseModel):
+    dry_run: bool = False
+
+
+@app.post("/api/admin/premium/dispatch-review-requests", dependencies=[Depends(require_admin)])
+async def admin_dispatch_review_requests(
+    payload: ReviewRequestDispatchIn = Body(default=ReviewRequestDispatchIn()),
+) -> dict[str, Any]:
+    """Email every beta claimant who's crossed the 60-day mark a
+    Trustpilot/Product Hunt review-ask. One email per address, ever.
+
+    Designed to be called by a GitHub Actions daily cron; can also be
+    invoked manually from the admin dashboard. Pass ``dry_run=true``
+    to count eligible recipients without actually sending.
+    """
+    async def _send(slug: str, *, to: str, **kw: Any) -> None:
+        await email_service.send_template(slug, to=to, **kw)
+
+    result = await review_requests_module.dispatch_review_requests(
+        db, _send, dry_run=payload.dry_run,
+    )
+    return {"status": "ok", **result}
 
 
 # ---------- Premium: request-driven compatibility report ----------

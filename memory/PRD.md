@@ -85,6 +85,14 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2m · Day-60 review-ask cron + workflow hardening
+- ✅ **Day-60 review-ask cron** — new `/app/backend/review_requests.py` finds beta claimants whose `created_at <= now - 60d` AND `expires_at >= now + 7d`, sends a Trustpilot + Product Hunt review request via the new `premium_review_ask` template (`12-day-60-review-request.html/.txt`), and records the dispatch in `review_requests` (idempotent — one email per address, ever). Admin endpoint `POST /api/admin/premium/dispatch-review-requests` with optional `dry_run`. Daily GitHub Action `/app/.github/workflows/day-60-review-request.yml` (10:00 UTC) calls it.
+- ✅ **GitHub Actions workflow hardening** — patched `monthly-forecast.yml` to use the same `mktemp + %{http_code} + cat body` pattern as `weekly-horoscope.yml` so failures surface the HTTP code and response body in the Actions log (was silently exiting 22 on `curl -fsS`). Same pattern applied to the new day-60 workflow. Includes a hint that 404s mean production is missing the latest endpoint and needs a redeploy.
+- ✅ Test suite: **81 unit tests green** (77 pure unit + 4 new day-60 tests covering auth, eligibility window, idempotency, dry-run).
+- 🔁 Live verification against preview: `POST /api/admin/premium/dispatch-review-requests` (dry-run) returns `{eligible:0, sent_count:0, status:ok}`; unauth requests return 401.
+
+
+
 ### 2026-05-23 · Session 2l · Premium cron + admin compatibility flow + Stripe hardening
 - ✅ **Monthly forecast dispatch** — new `forecast.py` module generates the month's transit themes via Claude Sonnet 4.5 (cached per `month_key` in `forecast_dispatches`) and ships the rendered `premium_forecast` email to every active entitlement. Per-email receipts in `forecast_recipients` guarantee at-most-once delivery per month. Admin endpoints: `POST /api/admin/premium/dispatch-monthly-forecast` (with `force` flag) and `GET /api/admin/premium/forecast-preview`. Inactive/expired entitlements are skipped.
 - ✅ **GitHub Actions monthly cron** — new `/app/.github/workflows/monthly-forecast.yml` (`'0 9 1 * *'`, 09:00 UTC on the 1st) calls the admin endpoint with `set -euo pipefail` + jq parsing. Requires `LIVEASTROLOGY_URL` + `LIVEASTROLOGY_ADMIN_SECRET` GitHub secrets.

@@ -1,0 +1,66 @@
+# Daily cron that emails every beta user a Day-60 review-ask
+# (Trustpilot + Product Hunt CTA) when they cross the 60-day mark.
+#
+# Fires at 10:00 UTC every day. The endpoint is idempotent — one email
+# per address, ever — so running it daily simply picks up that day's
+# new cohort of 60-day-old claimants.
+#
+# Setup:
+#   1. In GitHub → Settings → Secrets and variables → Actions, add:
+#        - LIVEASTROLOGY_URL           = https://liveastrology.app
+#        - LIVEASTROLOGY_ADMIN_SECRET  = <the ADMIN_SECRET from /app/backend/.env>
+#   2. Push this file on the default branch.
+#   3. Check the Actions tab the next day at 10:00 UTC (or run manually).
+
+name: Day-60 review-ask dispatch
+
+on:
+  schedule:
+    - cron: '0 10 * * *'   # daily at 10:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "If 'true', count eligible recipients without sending"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/admin/premium/dispatch-review-requests
+        env:
+          BASE_URL: ${{ secrets.LIVEASTROLOGY_URL }}
+          ADMIN:    ${{ secrets.LIVEASTROLOGY_ADMIN_SECRET }}
+          DRY_RUN:  ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_URL:-}" ] || [ -z "${ADMIN:-}" ]; then
+            echo "::error::LIVEASTROLOGY_URL and LIVEASTROLOGY_ADMIN_SECRET secrets must be set."
+            exit 1
+          fi
+          echo "Dispatching Day-60 review-asks (dry_run=${DRY_RUN}) to ${BASE_URL}…"
+
+          response_file=$(mktemp)
+          code=$(curl -sS -o "$response_file" -w "%{http_code}" \
+            -X POST "${BASE_URL}/api/admin/premium/dispatch-review-requests" \
+            -H "Authorization: Bearer ${ADMIN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"dry_run\": ${DRY_RUN}}")
+
+          echo "HTTP $code"
+          cat "$response_file"
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Day-60 review-ask dispatch failed with HTTP $code (body above)."
+            echo "::error::If this is a 404, redeploy the latest backend to ${BASE_URL} — the /api/admin/premium/dispatch-review-requests endpoint must be live."
+            exit 1
+          fi
+
+          sent=$(jq -r '.sent_count // 0' "$response_file")
+          eligible=$(jq -r '.eligible // 0' "$response_file")
+          echo "::notice::Sent ${sent} Day-60 review-ask emails (out of ${eligible} eligible)."

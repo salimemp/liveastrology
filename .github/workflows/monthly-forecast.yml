@@ -43,11 +43,23 @@ jobs:
             exit 1
           fi
           echo "Dispatching monthly forecast (force=${FORCE}) to ${BASE_URL}…"
-          response=$(curl -fsS -X POST \
+
+          response_file=$(mktemp)
+          code=$(curl -sS -o "$response_file" -w "%{http_code}" \
+            -X POST "${BASE_URL}/api/admin/premium/dispatch-monthly-forecast" \
             -H "Authorization: Bearer ${ADMIN}" \
             -H "Content-Type: application/json" \
-            -d "{\"force\": ${FORCE}}" \
-            "${BASE_URL}/api/admin/premium/dispatch-monthly-forecast")
-          echo "$response" | jq .
-          sent=$(echo "$response" | jq -r .sent_count)
+            -d "{\"force\": ${FORCE}}")
+
+          echo "HTTP $code"
+          cat "$response_file"
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Monthly forecast dispatch failed with HTTP $code (body above)."
+            echo "::error::If this is a 404, your production deploy at ${BASE_URL} is missing the /api/admin/premium/dispatch-monthly-forecast endpoint — redeploy the latest backend, then re-run this workflow."
+            exit 1
+          fi
+
+          sent=$(jq -r '.sent_count // 0' "$response_file")
           echo "::notice::Sent monthly forecast to ${sent} active Premium entitlements."

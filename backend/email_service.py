@@ -48,6 +48,7 @@ TEMPLATES: dict[str, tuple[str, str, str]] = {
     "premium_10_planet":   ("html/09-premium-10-planet-report.html",  "txt/09-premium-10-planet-report.txt",  "Your 10-Planet Reading — Live Astrology Premium"),
     "premium_forecast":    ("html/10-premium-monthly-forecast.html",  "txt/10-premium-monthly-forecast.txt",  "{month_name} forecast — Live Astrology Premium"),
     "premium_compatibility": ("html/11-premium-compatibility.html",   "txt/11-premium-compatibility.txt",     "{person1_name} & {person2_name} — Premium Compatibility"),
+    "premium_review_ask":  ("html/12-day-60-review-request.html",     "txt/12-day-60-review-request.txt",     "How's your 60 days been, {name}?"),
 }
 
 

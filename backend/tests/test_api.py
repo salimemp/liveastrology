@@ -1342,3 +1342,123 @@ async def test_customer_portal_returns_409_when_no_stripe_relationship(client):
     )
     assert r.status_code == 409
 
+
+# ---------- Day-60 review-ask dispatch ----------
+async def test_review_requests_requires_admin(client):
+    ac, _ = client
+    r = await ac.post("/api/admin/premium/dispatch-review-requests")
+    assert r.status_code == 401
+
+
+async def test_review_requests_only_sends_to_60_day_claims(client, sent_emails):
+    """Eligibility: created_at <= now-60d AND expires_at >= now+7d AND
+    no existing review_requests row."""
+    ac, mock_db = client
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    # Eligible: claimed 61 days ago, beta still valid for ~29 days
+    await mock_db.beta_claims.insert_one({
+        "email": "eligible@example.com",
+        "name": "Eli",
+        "claim_number": 1,
+        "created_at": now - timedelta(days=61),
+        "expires_at": now + timedelta(days=29),
+    })
+    # Too young: claimed 30 days ago
+    await mock_db.beta_claims.insert_one({
+        "email": "fresh@example.com",
+        "name": "Fresh",
+        "claim_number": 2,
+        "created_at": now - timedelta(days=30),
+        "expires_at": now + timedelta(days=60),
+    })
+    # Too late: only 3 days left on the beta — don't ask now, the
+    # expiry email itself will be the nudge.
+    await mock_db.beta_claims.insert_one({
+        "email": "tooLate@example.com",
+        "name": "Late",
+        "claim_number": 3,
+        "created_at": now - timedelta(days=88),
+        "expires_at": now + timedelta(days=2),
+    })
+
+    r = await ac.post(
+        "/api/admin/premium/dispatch-review-requests",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"dry_run": False},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["eligible"] == 1
+    assert body["sent_count"] == 1
+
+    review_emails = [e for e in sent_emails if e["slug"] == "premium_review_ask"]
+    assert len(review_emails) == 1
+    assert review_emails[0]["to"] == "eligible@example.com"
+    vars_ = review_emails[0]["vars"]
+    assert vars_["name"] == "Eli"
+    assert "trustpilot.com" in vars_["trustpilot_url"]
+    assert "producthunt" in vars_["producthunt_url"]
+    assert vars_["expires_at_human"]
+    assert vars_["unsubscribe_url"].startswith("https://")
+
+
+async def test_review_requests_is_idempotent_per_email(client, sent_emails):
+    """Re-running the cron never resends to the same address."""
+    ac, mock_db = client
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    await mock_db.beta_claims.insert_one({
+        "email": "once@example.com",
+        "name": "Once",
+        "claim_number": 1,
+        "created_at": now - timedelta(days=65),
+        "expires_at": now + timedelta(days=25),
+    })
+
+    headers = {"Authorization": "Bearer test-admin-secret"}
+    r1 = await ac.post("/api/admin/premium/dispatch-review-requests", headers=headers, json={"dry_run": False})
+    assert r1.json()["sent_count"] == 1
+    r2 = await ac.post("/api/admin/premium/dispatch-review-requests", headers=headers, json={"dry_run": False})
+    body = r2.json()
+    assert body["sent_count"] == 0
+    assert body["skipped_existing"] == 1
+
+    sent = [e for e in sent_emails if e["slug"] == "premium_review_ask"]
+    assert len(sent) == 1
+
+
+async def test_review_requests_dry_run_does_not_send(client, sent_emails):
+    """dry_run=true counts eligibility but skips Resend + idempotency writes."""
+    ac, mock_db = client
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    await mock_db.beta_claims.insert_one({
+        "email": "dry@example.com",
+        "name": "Dry",
+        "claim_number": 1,
+        "created_at": now - timedelta(days=70),
+        "expires_at": now + timedelta(days=20),
+    })
+
+    r = await ac.post(
+        "/api/admin/premium/dispatch-review-requests",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"dry_run": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["eligible"] == 1
+    assert body["sent_count"] == 1
+    assert body["dry_run"] is True
+
+    # No real email was dispatched
+    assert not any(e["slug"] == "premium_review_ask" for e in sent_emails)
+    # And no idempotency row was written, so a subsequent real send still fires
+    count = await mock_db.review_requests.count_documents({})
+    assert count == 0
+
