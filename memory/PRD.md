@@ -269,11 +269,11 @@ never surface to the user (the API always responds 202).
 - Social media launch — TikTok + Instagram (operational, not engineering).
 
 ### P1 — Production hardening for Premium (next session)
-- 🔒 **Stripe webhook signature verification**: currently returns 200 on bad signature in dev. Set `STRIPE_WEBHOOK_SECRET` and switch to 401 before flipping to a real Stripe account.
-- 📧 **Premium fulfilment**: wire Resend templates for (a) 10-planet PDF report on activation, (b) monthly forecast email, (c) premium compatibility report on demand.
-- 🍎 **iOS PWA icons**: add raster PNG fallbacks (iOS prefers PNG for A2HS over SVG).
-- 🔁 **Stripe true subscriptions**: swap one-time charges for Stripe Subscriptions + Customer Portal once a real Stripe account is connected.
-- 🚀 **Push notifications**: deferred from Phase 3 — needs VAPID keys + opt-in UI + push library.
+- ✅ **Premium fulfilment**: 4 Resend templates shipped (welcome + 10-planet + monthly forecast + compatibility). Welcome + 10-planet fire on beta grant. *Remaining*: monthly cron to dispatch `premium_forecast` on the 1st, and the request-driven `premium_compatibility` flow.
+- ✅ **iOS PWA icons**: PNG fallbacks added 2026-05-23.
+- 🔒 **Stripe webhook signature verification**: when re-enabling Stripe after beta — set `STRIPE_WEBHOOK_SECRET` and switch the handler to 401 on bad signature.
+- 🔁 **Stripe true subscriptions**: when re-enabling Stripe, swap one-time charges for true Stripe Subscriptions + Customer Portal.
+- 🚀 **PWA push notifications**: deferred per user choice — needs VAPID keys + opt-in UI + push library.
 
 ### P2 — Backlog
 - Placidus / Koch / Equal house system options (whole-sign is live now; others are larger due to polar-latitude edge cases).
