@@ -26,6 +26,15 @@ from typing import Any
 logger = logging.getLogger("liveastrology.billing")
 
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+# Subscription mode toggle: when ``STRIPE_SUBSCRIPTION_MODE=1`` the
+# checkout will create a true recurring subscription instead of a
+# one-time charge. Off by default for the beta phase.
+STRIPE_SUBSCRIPTION_MODE = os.environ.get("STRIPE_SUBSCRIPTION_MODE", "0") == "1"
+# Stripe Price IDs for the recurring subscription products. Only used
+# when STRIPE_SUBSCRIPTION_MODE is on.
+STRIPE_PRICE_MONTHLY = os.environ.get("STRIPE_PRICE_MONTHLY", "")
+STRIPE_PRICE_YEARLY = os.environ.get("STRIPE_PRICE_YEARLY", "")
 
 # Server-side fixed packages. Frontend may only choose by id; amounts
 # are never accepted from the frontend.
@@ -234,24 +243,35 @@ async def get_entitlement(db: Any, email: str) -> dict[str, Any]:
 
 async def handle_webhook(db: Any, raw_body: bytes, signature: str | None) -> dict[str, Any]:
     """Process a Stripe webhook payload. Grants entitlements
-    idempotently for ``checkout.session.completed`` events."""
+    idempotently for ``checkout.session.completed`` events.
+
+    When ``STRIPE_WEBHOOK_SECRET`` is configured we require a valid
+    signature — invalid payloads return ``status: rejected`` and the
+    caller MUST surface this as a 401/400 to Stripe so the event is
+    retried. In dev (no secret configured) we accept unsigned payloads
+    but still log loudly so the gap is obvious.
+    """
     from emergentintegrations.payments.stripe.checkout import StripeCheckout  # type: ignore
+
+    secret_required = bool(STRIPE_WEBHOOK_SECRET)
 
     checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
     try:
         evt = await checkout.handle_webhook(raw_body, signature or "")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Stripe webhook verification failed: %s", exc)
-        # In dev/test we accept unsigned payloads, but log loudly.
-        return {"status": "rejected", "reason": str(exc)}
+        if secret_required:
+            logger.warning("Stripe webhook signature verification FAILED: %s", exc)
+            return {"status": "rejected", "verified": False, "reason": str(exc)}
+        logger.warning("Stripe webhook unsigned (dev mode): %s", exc)
+        return {"status": "rejected", "verified": False, "reason": str(exc), "dev_mode": True}
 
     if not getattr(evt, "session_id", None):
-        return {"status": "ok", "event": evt.event_type, "handled": False}
+        return {"status": "ok", "verified": True, "event": evt.event_type, "handled": False}
 
     txn = await db.payment_transactions.find_one({"session_id": evt.session_id}, {"_id": 0})
     if not txn:
         logger.info("Stripe webhook for unknown session_id %s", evt.session_id)
-        return {"status": "ok", "event": evt.event_type, "handled": False}
+        return {"status": "ok", "verified": True, "event": evt.event_type, "handled": False}
 
     await db.payment_transactions.update_one(
         {"session_id": evt.session_id},
@@ -266,4 +286,43 @@ async def handle_webhook(db: Any, raw_body: bytes, signature: str | None) -> dic
     if evt.payment_status == "paid" and txn.get("payment_status") != "paid":
         granted = await _grant_entitlement(db, txn)
 
-    return {"status": "ok", "event": evt.event_type, "handled": True, "granted": granted}
+    return {"status": "ok", "verified": True, "event": evt.event_type, "handled": True, "granted": granted}
+
+
+async def create_customer_portal_session(*, customer_id: str, return_url: str) -> dict[str, Any]:
+    """Create a Stripe Customer Portal session. Requires a real Stripe
+    customer_id (resolved from past Checkout sessions). Returns the
+    portal URL the user can be redirected to.
+
+    Only available when ``STRIPE_SUBSCRIPTION_MODE`` is on — in
+    one-time-charge mode there's no recurring billing to manage.
+    """
+    if not STRIPE_SUBSCRIPTION_MODE:
+        raise RuntimeError("Customer Portal requires STRIPE_SUBSCRIPTION_MODE=1")
+    if not STRIPE_API_KEY:
+        raise RuntimeError("Stripe is not configured")
+    if not customer_id:
+        raise ValueError("customer_id is required")
+
+    # Use Stripe SDK directly here since the emergentintegrations
+    # wrapper doesn't expose the Customer Portal API.
+    import stripe  # type: ignore
+    stripe.api_key = STRIPE_API_KEY
+    session = stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url=return_url,
+    )
+    return {"url": session.url}
+
+
+async def get_customer_id_for_email(db: Any, email: str) -> str | None:
+    """Look up the Stripe customer_id used in the most recent paid
+    Checkout session for this email. Returns ``None`` if we have no
+    Stripe-side billing relationship to manage (e.g. beta users)."""
+    email = email.strip().lower()
+    txn = await db.payment_transactions.find_one(
+        {"email": email, "payment_status": "paid", "customer_id": {"$exists": True}},
+        {"_id": 0, "customer_id": 1},
+        sort=[("updated_at", -1)],
+    )
+    return txn.get("customer_id") if txn else None

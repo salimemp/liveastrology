@@ -1,0 +1,53 @@
+# External monthly cron that dispatches the Premium monthly forecast
+# to every active Premium entitlement.
+#
+# Fires at 09:00 UTC on the 1st of each month. The backend endpoint is
+# idempotent — running this workflow more than once in the same month
+# is safe (only emails not yet sent in that month get dispatched).
+#
+# Setup:
+#   1. In GitHub → Settings → Secrets and variables → Actions, add:
+#        - LIVEASTROLOGY_URL           = https://liveastrology.app
+#        - LIVEASTROLOGY_ADMIN_SECRET  = <the ADMIN_SECRET from /app/backend/.env>
+#   2. Push this file on the default branch.
+#   3. Check the Actions tab on the next 1st (or run manually).
+
+name: Monthly Premium forecast dispatch
+
+on:
+  schedule:
+    - cron: '0 9 1 * *'    # 09:00 UTC on the 1st of every month
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force-regenerate the forecast even if cached"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/admin/premium/dispatch-monthly-forecast
+        env:
+          BASE_URL:  ${{ secrets.LIVEASTROLOGY_URL }}
+          ADMIN:     ${{ secrets.LIVEASTROLOGY_ADMIN_SECRET }}
+          FORCE:     ${{ github.event.inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_URL:-}" ] || [ -z "${ADMIN:-}" ]; then
+            echo "::error::LIVEASTROLOGY_URL and LIVEASTROLOGY_ADMIN_SECRET secrets must be set."
+            exit 1
+          fi
+          echo "Dispatching monthly forecast (force=${FORCE}) to ${BASE_URL}…"
+          response=$(curl -fsS -X POST \
+            -H "Authorization: Bearer ${ADMIN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"force\": ${FORCE}}" \
+            "${BASE_URL}/api/admin/premium/dispatch-monthly-forecast")
+          echo "$response" | jq .
+          sent=$(echo "$response" | jq -r .sent_count)
+          echo "::notice::Sent monthly forecast to ${sent} active Premium entitlements."

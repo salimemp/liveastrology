@@ -50,7 +50,9 @@ from slowapi.util import get_remote_address
 
 import beta as beta_module
 import billing as billing_module
+import compatibility_reports as compatibility_module
 import email_service
+import forecast as forecast_module
 import interpretation as interpretation_module
 import scheduler as scheduler_module
 import turnstile as turnstile_module
@@ -345,7 +347,41 @@ async def billing_status(email: str) -> dict[str, Any]:
 async def stripe_webhook(request: Request) -> dict[str, Any]:
     raw = await request.body()
     signature = request.headers.get("Stripe-Signature") or request.headers.get("stripe-signature")
-    return await billing_module.handle_webhook(db, raw, signature)
+    result = await billing_module.handle_webhook(db, raw, signature)
+    # When a webhook secret is configured AND the payload didn't verify,
+    # respond with 400 so Stripe retries (and so the secret is enforced).
+    if result.get("status") == "rejected" and not result.get("dev_mode"):
+        raise HTTPException(status_code=400, detail="webhook signature verification failed")
+    return result
+
+
+class CustomerPortalIn(BaseModel):
+    email: EmailStr
+    return_url: Annotated[str, Field(min_length=8, max_length=200)]
+
+
+@app.post("/api/billing/portal")
+@limiter.limit("10/minute")
+async def billing_portal(request: Request, payload: CustomerPortalIn = Body(...)) -> dict[str, Any]:
+    """Create a Stripe Customer Portal session for an existing paying
+    subscriber. Only available when STRIPE_SUBSCRIPTION_MODE is on; for
+    beta users (plan='beta') this returns a 409 since there's no Stripe
+    billing relationship to manage."""
+    customer_id = await billing_module.get_customer_id_for_email(db, str(payload.email))
+    if not customer_id:
+        raise HTTPException(
+            status_code=409,
+            detail="No Stripe subscription found for this email — nothing to manage.",
+        )
+    try:
+        return await billing_module.create_customer_portal_session(
+            customer_id=customer_id,
+            return_url=payload.return_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 
@@ -412,6 +448,95 @@ async def admin_publish_feedback(ticket_id: str, published: bool = True) -> dict
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="ticket not found or consent not given")
     return {"status": "ok", "ticket_id": ticket_id, "published": published}
+
+
+# ---------- Premium: monthly forecast dispatch (admin / cron) ----------
+class ForecastDispatchIn(BaseModel):
+    force: bool = False
+
+
+@app.post("/api/admin/premium/dispatch-monthly-forecast", dependencies=[Depends(require_admin)])
+async def admin_dispatch_monthly_forecast(payload: ForecastDispatchIn = Body(default=ForecastDispatchIn())) -> dict[str, Any]:
+    """Generate (if not cached) and send the current month's Premium
+    forecast to every active entitlement. Designed to be called by a
+    GitHub Actions cron on the 1st of each month; can also be invoked
+    manually from the admin dashboard.
+    """
+    async def _send(slug: str, *, to: str, **kw: Any) -> None:
+        await email_service.send_template(slug, to=to, **kw)
+
+    try:
+        result = await forecast_module.dispatch_monthly_forecast(
+            db, _send, force=payload.force,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"status": "ok", **result}
+
+
+@app.get("/api/admin/premium/forecast-preview", dependencies=[Depends(require_admin)])
+async def admin_forecast_preview(force: bool = False) -> dict[str, Any]:
+    """Read-only preview of the current month's forecast payload
+    without sending. Useful for sanity-checking the LLM output before
+    triggering the dispatch."""
+    try:
+        forecast = await forecast_module.get_monthly_forecast(db, force=force)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"status": "ok", "forecast": forecast}
+
+
+# ---------- Premium: request-driven compatibility report ----------
+class CompatibilitySendIn(BaseModel):
+    recipient_email: EmailStr
+    person1_name: Annotated[str, Field(min_length=1, max_length=80)]
+    person1_sun: Annotated[str, Field(min_length=3, max_length=20)]
+    person1_moon: Annotated[str, Field(min_length=3, max_length=20)]
+    person2_name: Annotated[str, Field(min_length=1, max_length=80)]
+    person2_sun: Annotated[str, Field(min_length=3, max_length=20)]
+    person2_moon: Annotated[str, Field(min_length=3, max_length=20)]
+    score: Annotated[int, Field(ge=0, le=100)]
+
+
+@app.post("/api/admin/premium/compatibility/send", dependencies=[Depends(require_admin)])
+async def admin_send_compatibility(payload: CompatibilitySendIn = Body(...)) -> dict[str, Any]:
+    """Admin-only endpoint that generates a Premium compatibility
+    report via Claude and emails it to ``recipient_email`` using the
+    `premium_compatibility` template. Used when a paying user replies
+    to their welcome email asking for a synastry deep-dive.
+    """
+    # Sanity check — the recipient must be an active Premium member.
+    ent = await db.entitlements.find_one(
+        {"email": str(payload.recipient_email).lower(), "status": "active"},
+        {"_id": 0, "expires_at": 1},
+    )
+    if not ent:
+        raise HTTPException(
+            status_code=409,
+            detail="Recipient has no active Premium entitlement.",
+        )
+
+    async def _send(slug: str, *, to: str, **kw: Any) -> None:
+        await email_service.send_template(slug, to=to, **kw)
+
+    try:
+        result = await compatibility_module.generate_and_send(
+            db, _send,
+            recipient_email=str(payload.recipient_email),
+            person1_name=payload.person1_name,
+            person1_sun=payload.person1_sun,
+            person1_moon=payload.person1_moon,
+            person2_name=payload.person2_name,
+            person2_sun=payload.person2_sun,
+            person2_moon=payload.person2_moon,
+            score=payload.score,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"status": "ok", **result}
+
 
 
 # ---------- Premium fulfilment helpers ----------

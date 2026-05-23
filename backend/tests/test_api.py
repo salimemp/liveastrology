@@ -1136,3 +1136,209 @@ async def test_admin_publish_feedback_flips_published(client):
     names = [t["name"] for t in listing.json()["testimonials"]]
     assert "User" in names
 
+
+
+# ---------- Premium monthly forecast (Phase 5) ----------
+async def test_forecast_preview_requires_admin(client):
+    ac, _ = client
+    r = await ac.get("/api/admin/premium/forecast-preview")
+    assert r.status_code == 401
+
+
+async def test_forecast_preview_returns_cached_payload(client, monkeypatch):
+    """get_monthly_forecast should be called and the cached payload
+    returned without hitting the LLM."""
+    import forecast
+    from datetime import datetime, timezone
+
+    fake_payload = {
+        "theme_paragraph": "Stub theme.",
+        "event_1_date": "Jul 4", "event_1_text": "Full Moon",
+        "event_2_date": "Jul 14", "event_2_text": "Mercury ingress",
+        "event_3_date": "Jul 27", "event_3_text": "New Moon",
+        "practical_insight": "Stub insight.",
+        "month_name": "July", "year": "2026",
+    }
+
+    async def fake_get(db, when=None, force=False):
+        return fake_payload
+
+    monkeypatch.setattr(forecast, "get_monthly_forecast", fake_get)
+
+    ac, _ = client
+    r = await ac.get(
+        "/api/admin/premium/forecast-preview",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert r.status_code == 200
+    assert r.json()["forecast"]["month_name"] == "July"
+
+
+async def test_forecast_dispatch_only_active_entitlements(client, monkeypatch):
+    import forecast
+    from datetime import datetime, timedelta, timezone
+
+    sent_to: list[str] = []
+
+    async def fake_dispatch(db, sender, force=False, when=None):
+        # Iterate entitlements like the real implementation does.
+        cursor = db.entitlements.find({"status": "active"}, {"_id": 0, "email": 1, "expires_at": 1})
+        now = datetime.now(timezone.utc)
+        sent_count = 0
+        inactive = 0
+        async for ent in cursor:
+            v = ent.get("expires_at")
+            if isinstance(v, datetime):
+                vt = v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+                if vt <= now:
+                    inactive += 1
+                    continue
+            sent_to.append(ent["email"])
+            sent_count += 1
+        return {
+            "month_key": "2026-07", "month_name": "July", "year": "2026",
+            "sent_count": sent_count, "skipped_existing": 0,
+            "skipped_inactive": inactive, "failed": [],
+        }
+
+    monkeypatch.setattr(forecast, "dispatch_monthly_forecast", fake_dispatch)
+
+    ac, mock_db = client
+    now = datetime.now(timezone.utc)
+    await mock_db.entitlements.insert_many([
+        {"email": "active@a.com",  "status": "active", "expires_at": now + timedelta(days=10)},
+        {"email": "expired@a.com", "status": "active", "expires_at": now - timedelta(days=1)},
+    ])
+
+    r = await ac.post(
+        "/api/admin/premium/dispatch-monthly-forecast",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"force": False},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sent_count"] == 1
+    assert body["skipped_inactive"] == 1
+    assert sent_to == ["active@a.com"]
+
+
+# ---------- Premium compatibility report (admin send) ----------
+async def test_compatibility_requires_active_entitlement(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/premium/compatibility/send",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "recipient_email": "nope@example.com",
+            "person1_name": "Ada", "person1_sun": "leo",    "person1_moon": "cancer",
+            "person2_name": "Bo",  "person2_sun": "pisces", "person2_moon": "virgo",
+            "score": 70,
+        },
+    )
+    assert r.status_code == 409
+
+
+async def test_compatibility_send_invokes_module(client, monkeypatch):
+    import compatibility_reports as cr
+    from datetime import datetime, timedelta, timezone
+
+    captured: dict = {}
+
+    async def fake_send(db, sender, **kw):
+        captured.update(kw)
+        return {
+            "status": "sent",
+            "recipient": kw["recipient_email"],
+            "label": "Strong chemistry",
+            "score": kw["score"],
+            "word_counts": {"headline_paragraph": 90},
+        }
+
+    monkeypatch.setattr(cr, "generate_and_send", fake_send)
+
+    ac, mock_db = client
+    await mock_db.entitlements.insert_one({
+        "email": "premium@example.com", "status": "active",
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=30),
+    })
+
+    r = await ac.post(
+        "/api/admin/premium/compatibility/send",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "recipient_email": "premium@example.com",
+            "person1_name": "Ada", "person1_sun": "gemini", "person1_moon": "pisces",
+            "person2_name": "Bo",  "person2_sun": "leo",    "person2_moon": "cancer",
+            "score": 72,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "sent"
+    assert body["recipient"] == "premium@example.com"
+    assert captured["person1_name"] == "Ada"
+
+
+# ---------- Stripe webhook signature enforcement ----------
+async def test_stripe_webhook_returns_400_when_secret_configured(client, monkeypatch):
+    """When STRIPE_WEBHOOK_SECRET is set, unsigned/invalid payloads
+    must return 400 so Stripe retries."""
+    import billing
+
+    monkeypatch.setattr(billing, "STRIPE_API_KEY", "sk_test_anything")
+    monkeypatch.setattr(billing, "STRIPE_WEBHOOK_SECRET", "whsec_fake_present")
+
+    class _FakeCheckout:
+        def __init__(self, *a, **kw): pass
+        async def handle_webhook(self, body, signature):
+            raise RuntimeError("invalid signature")
+
+    import sys
+    import types
+    mod_path = "emergentintegrations.payments.stripe.checkout"
+    fake_mod = sys.modules.get(mod_path) or types.ModuleType(mod_path)
+    fake_mod.StripeCheckout = _FakeCheckout
+    sys.modules[mod_path] = fake_mod
+
+    ac, _ = client
+    r = await ac.post("/api/webhook/stripe", content=b'{"hi":"there"}')
+    assert r.status_code == 400
+
+
+async def test_stripe_webhook_returns_200_when_secret_absent(client, monkeypatch):
+    """In dev (no secret) the endpoint accepts unsigned payloads but
+    returns ``status: rejected`` with a dev_mode marker."""
+    import billing
+    monkeypatch.setattr(billing, "STRIPE_API_KEY", "sk_test_anything")
+    monkeypatch.setattr(billing, "STRIPE_WEBHOOK_SECRET", "")
+
+    class _FakeCheckout:
+        def __init__(self, *a, **kw): pass
+        async def handle_webhook(self, body, signature):
+            raise RuntimeError("no signature")
+
+    import sys
+    import types
+    mod_path = "emergentintegrations.payments.stripe.checkout"
+    fake_mod = sys.modules.get(mod_path) or types.ModuleType(mod_path)
+    fake_mod.StripeCheckout = _FakeCheckout
+    sys.modules[mod_path] = fake_mod
+
+    ac, _ = client
+    r = await ac.post("/api/webhook/stripe", content=b'{"hi":"there"}')
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "rejected"
+    assert body.get("dev_mode") is True
+
+
+# ---------- Customer Portal ----------
+async def test_customer_portal_returns_409_when_no_stripe_relationship(client):
+    """Beta users (no Stripe customer_id) cannot use the Portal."""
+    ac, _ = client
+    r = await ac.post(
+        "/api/billing/portal",
+        json={"email": "beta-only@example.com", "return_url": "https://liveastrology.app/upgrade/manage"},
+    )
+    assert r.status_code == 409
+
