@@ -85,6 +85,23 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-05-23 · Session 2l · Premium cron + admin compatibility flow + Stripe hardening
+- ✅ **Monthly forecast dispatch** — new `forecast.py` module generates the month's transit themes via Claude Sonnet 4.5 (cached per `month_key` in `forecast_dispatches`) and ships the rendered `premium_forecast` email to every active entitlement. Per-email receipts in `forecast_recipients` guarantee at-most-once delivery per month. Admin endpoints: `POST /api/admin/premium/dispatch-monthly-forecast` (with `force` flag) and `GET /api/admin/premium/forecast-preview`. Inactive/expired entitlements are skipped.
+- ✅ **GitHub Actions monthly cron** — new `/app/.github/workflows/monthly-forecast.yml` (`'0 9 1 * *'`, 09:00 UTC on the 1st) calls the admin endpoint with `set -euo pipefail` + jq parsing. Requires `LIVEASTROLOGY_URL` + `LIVEASTROLOGY_ADMIN_SECRET` GitHub secrets.
+- ✅ **Request-driven Premium compatibility** — new `compatibility_reports.py` generates 6 paragraphs (headline / Sun×Sun / Moon×Moon / Venus×Mars / composite / work) via Claude Sonnet 4.5. Admin endpoint `POST /api/admin/premium/compatibility/send` validates the recipient has an active entitlement (409 otherwise), renders the existing `premium_compatibility` template via Resend, persists an audit row.
+- ✅ **Premium admin tab** — new `<PremiumAdmin>` component in the admin dashboard (forecast Preview / Dispatch / Force-regenerate; compatibility form with sun/moon dropdowns + 0-100 score slider).
+- ✅ **Stripe webhook signature enforcement** — production-critical: returns **HTTP 400** when `STRIPE_WEBHOOK_SECRET` is configured and signature fails verification. Dev-mode: returns HTTP 200 with `{status:rejected, dev_mode:true}` when the secret is absent AND the `Stripe-Signature` header is missing or malformed.
+- ✅ **Stripe Customer Portal + Subscription scaffolding** — new endpoint `POST /api/billing/portal` and env knobs `STRIPE_SUBSCRIPTION_MODE`, `STRIPE_PRICE_MONTHLY`, `STRIPE_PRICE_YEARLY` ready for the post-beta switch. Beta-only users get 409 (no Stripe relationship to manage).
+- ✅ Test suite: **88 tests green** (73 unit + 6 live-beta + 9 phase-5 live). Testing agent: 100% backend + 100% frontend, all acceptance criteria pass.
+
+### 2026-05-23 · Session 2k · Beta launch + Premium fulfilment + categorised feedback + testimonials
+- ✅ **Beta launch for first 100 users** — new `beta.py` module + endpoints `GET /api/beta/status` and `POST /api/beta/claim`. Stripe payments disabled in the UI for the beta phase; `<BetaClaimCard>` grants free 90-day Premium with idempotent per-email lookup and waitlist fallback at the cap.
+- ✅ **4 Resend transactional templates** matching site logo + voice: `08-premium-welcome`, `09-premium-10-planet-report`, `10-premium-monthly-forecast`, `11-premium-compatibility`. Welcome + 10-planet fire automatically on beta grant.
+- ✅ **Categorised feedback** (`/feedback`) — 4-axis ratings + opt-in `publish_consent`; explicit message on the form: *"By ticking this box you consent to your review and first name being displayed on liveastrology.app and inside the app."* Admin must still flip `published=true`.
+- ✅ **TestimonialsStrip** — admin-approved testimonials on the homepage (hides when empty); `/api/testimonials` strictly excludes the email field.
+- ✅ **PNG icon fallbacks** for iOS PWA A2HS.
+
+
 ### 2026-05-22 · Session 2j · Marketing audit — Phase 3 (PWA, GEO landings, Stripe Freemium)
 - ✅ **Stripe Freemium** — email-based subscription lookup (no full auth system per user choice 1c). New `billing.py` module with server-side fixed packages (`monthly` $4.99/30d, `yearly` $39/365d). Endpoints: `GET /api/billing/packages`, `POST /api/billing/checkout`, `GET /api/billing/checkout/status/{id}`, `GET /api/billing/status?email=`, `POST /api/webhook/stripe`. Two new collections: `payment_transactions` (one row per Checkout session, idempotent via `last_session_id`) and `entitlements` (one row per email with `expires_at`).
 - ✅ **Frontend `/upgrade`, `/upgrade/success`, `/upgrade/manage`** — plan selector with "Save 35%" badge on yearly, email field, Stripe redirect, polling success page (6 attempts × 2s), email-lookup status page. Premium feature list: full 10-planet chart, monthly forecast emails, premium compatibility report, priority AI interpretation, cancel anytime.

@@ -255,6 +255,17 @@ async def handle_webhook(db: Any, raw_body: bytes, signature: str | None) -> dic
 
     secret_required = bool(STRIPE_WEBHOOK_SECRET)
 
+    # Dev-mode safety: when no secret is configured we still want the
+    # endpoint to refuse obviously-unsigned payloads so a misconfigured
+    # production deployment fails loud rather than silently accepting
+    # spoofed events. The expected Stripe-Signature header looks like
+    # ``t=<ts>,v1=<hex>`` (possibly with v0); anything else is treated
+    # as "no signature" and rejected with dev_mode:true.
+    if not secret_required:
+        if not signature or "v1=" not in signature:
+            logger.warning("Stripe webhook rejected in dev mode — missing or malformed signature")
+            return {"status": "rejected", "verified": False, "reason": "missing or malformed Stripe-Signature header", "dev_mode": True}
+
     checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
     try:
         evt = await checkout.handle_webhook(raw_body, signature or "")
