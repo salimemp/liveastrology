@@ -979,3 +979,160 @@ async def test_billing_grants_entitlement_on_paid_status(client, monkeypatch):
     assert r2.status_code == 200
     assert r2.json()["granted"] is None
 
+
+
+# ---------- Beta launch (Phase 4) ----------
+async def test_beta_status_initial_state(client):
+    ac, _ = client
+    r = await ac.get("/api/beta/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_seats"] == 100
+    assert body["seats_claimed"] == 0
+    assert body["seats_remaining"] == 100
+    assert body["waitlist_size"] == 0
+    assert body["me"] is None
+
+
+async def test_beta_claim_grants_entitlement(client):
+    ac, mock_db = client
+    r = await ac.post("/api/beta/claim", json={"email": "alpha@example.com", "name": "Alpha"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] == "granted"
+    assert body["claim_number"] == 1
+    assert body["seats_remaining"] == 99
+    # Entitlement row exists and is active
+    ent = await mock_db.entitlements.find_one({"email": "alpha@example.com"}, {"_id": 0})
+    assert ent is not None
+    assert ent["plan"] == "beta"
+    # Billing status reflects active premium
+    s = await ac.get("/api/billing/status?email=alpha@example.com")
+    assert s.status_code == 200
+    assert s.json()["active"] is True
+
+
+async def test_beta_claim_is_idempotent_per_email(client):
+    ac, _ = client
+    r1 = await ac.post("/api/beta/claim", json={"email": "dup@example.com"})
+    assert r1.status_code == 200
+    assert r1.json()["result"] == "granted"
+    r2 = await ac.post("/api/beta/claim", json={"email": "dup@example.com"})
+    assert r2.status_code == 200
+    assert r2.json()["result"] == "already_claimed"
+    # Seat counter must not double-decrement
+    status = await ac.get("/api/beta/status")
+    assert status.json()["seats_claimed"] == 1
+
+
+async def test_beta_claim_overflow_goes_to_waitlist(client, monkeypatch):
+    import beta
+    # Shrink the cap so the test is fast
+    monkeypatch.setattr(beta, "BETA_TOTAL_SEATS", 2)
+
+    ac, _ = client
+    for i in range(2):
+        r = await ac.post("/api/beta/claim", json={"email": f"early-{i}@example.com"})
+        assert r.json()["result"] == "granted"
+
+    # 3rd claim must be waitlisted with a position
+    r = await ac.post("/api/beta/claim", json={"email": "late@example.com"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] == "waitlisted"
+    assert body["waitlist_position"] == 1
+
+
+async def test_beta_claim_validates_email(client):
+    ac, _ = client
+    r = await ac.post("/api/beta/claim", json={"email": "not-an-email"})
+    assert r.status_code == 422
+
+
+# ---------- Feedback: new beta rating fields + publish consent ----------
+async def test_feedback_accepts_extended_rating_fields(client):
+    ac, mock_db = client
+    payload = {
+        "name": "Tester",
+        "email": "test@example.com",
+        "message": "Loved the AI reading, UI is clean",
+        "category": "praise",
+        "rating": 5,
+        "rating_accuracy": 5,
+        "rating_ui": 4,
+        "rating_ai_quality": 5,
+        "rating_recommend": 5,
+        "publish_consent": True,
+    }
+    r = await ac.post("/api/feedback", json=payload)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    row = await mock_db.feedback.find_one({"ticket_id": body["ticket_id"]}, {"_id": 0})
+    assert row["rating_accuracy"] == 5
+    assert row["rating_ui"] == 4
+    assert row["publish_consent"] is True
+    # Must default to unpublished — consent ≠ approval
+    assert row["published"] is False
+
+
+# ---------- Public testimonials ----------
+async def test_testimonials_returns_only_published_and_consented(client):
+    ac, mock_db = client
+    # Insert one consented+published, one consented+unpublished, one not-consented
+    from datetime import datetime, timezone
+    base = {"created_at": datetime.now(timezone.utc), "category": "praise"}
+    await mock_db.feedback.insert_many([
+        {**base, "ticket_id": "T1", "name": "Approved",   "message": "Great app",   "publish_consent": True,  "published": True},
+        {**base, "ticket_id": "T2", "name": "Pending",    "message": "Cool app",    "publish_consent": True,  "published": False},
+        {**base, "ticket_id": "T3", "name": "NoConsent",  "message": "Decent app",  "publish_consent": False, "published": True},
+    ])
+    r = await ac.get("/api/testimonials")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["testimonials"][0]["name"] == "Approved"
+    # Email must never leak even on public testimonial
+    assert "email" not in body["testimonials"][0]
+
+
+async def test_admin_publish_feedback_requires_consent(client):
+    ac, mock_db = client
+    from datetime import datetime, timezone
+    await mock_db.feedback.insert_one({
+        "ticket_id": "no-consent-1",
+        "name": "User",
+        "message": "Feedback",
+        "category": "general",
+        "publish_consent": False,
+        "published": False,
+        "created_at": datetime.now(timezone.utc),
+    })
+    r = await ac.post(
+        "/api/admin/feedback/no-consent-1/publish",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert r.status_code == 404  # cannot publish what user didn't consent to
+
+
+async def test_admin_publish_feedback_flips_published(client):
+    ac, mock_db = client
+    from datetime import datetime, timezone
+    await mock_db.feedback.insert_one({
+        "ticket_id": "ok-pub-1",
+        "name": "User",
+        "message": "Loved the chart",
+        "category": "praise",
+        "publish_consent": True,
+        "published": False,
+        "created_at": datetime.now(timezone.utc),
+    })
+    r = await ac.post(
+        "/api/admin/feedback/ok-pub-1/publish",
+        headers={"Authorization": "Bearer test-admin-secret"},
+    )
+    assert r.status_code == 200
+    listing = await ac.get("/api/testimonials")
+    names = [t["name"] for t in listing.json()["testimonials"]]
+    assert "User" in names
+

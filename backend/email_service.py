@@ -44,6 +44,10 @@ TEMPLATES: dict[str, tuple[str, str, str]] = {
     "contact_ack":         ("html/05-contact-acknowledgment.html",    "txt/05-contact-acknowledgment.txt",    "We received your message — Live Astrology"),
     "weekly_horoscope":    ("html/06-weekly-horoscope.html",          "txt/06-weekly-horoscope.txt",          "Your weekly cosmic brief"),
     "admin_notification":  ("html/07-admin-notification.html",        "txt/07-admin-notification.txt",        "[Live Astrology] {event_type} — {summary}"),
+    "premium_welcome":     ("html/08-premium-welcome.html",           "txt/08-premium-welcome.txt",           "Welcome to Live Astrology Premium ✨"),
+    "premium_10_planet":   ("html/09-premium-10-planet-report.html",  "txt/09-premium-10-planet-report.txt",  "Your 10-Planet Reading — Live Astrology Premium"),
+    "premium_forecast":    ("html/10-premium-monthly-forecast.html",  "txt/10-premium-monthly-forecast.txt",  "{month_name} forecast — Live Astrology Premium"),
+    "premium_compatibility": ("html/11-premium-compatibility.html",   "txt/11-premium-compatibility.txt",     "{person1_name} & {person2_name} — Premium Compatibility"),
 }
 
 

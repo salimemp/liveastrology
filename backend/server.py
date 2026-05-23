@@ -48,6 +48,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import beta as beta_module
 import billing as billing_module
 import email_service
 import interpretation as interpretation_module
@@ -213,8 +214,16 @@ class FeedbackIn(BaseModel):
     name: Annotated[str | None, Field(default=None, max_length=80)] = None
     email: EmailStr | None = None
     rating: Annotated[int | None, Field(default=None, ge=0, le=5)] = None
+    # Categorised beta-feedback ratings (1–5). All optional.
+    rating_accuracy: Annotated[int | None, Field(default=None, ge=1, le=5)] = None
+    rating_ui: Annotated[int | None, Field(default=None, ge=1, le=5)] = None
+    rating_ai_quality: Annotated[int | None, Field(default=None, ge=1, le=5)] = None
+    rating_recommend: Annotated[int | None, Field(default=None, ge=1, le=5)] = None
     category: Annotated[Literal["general", "bug", "feature", "content", "praise"], Field(default="general")] = "general"
     message: Annotated[str, Field(min_length=10, max_length=4000)]
+    # User explicitly consents to having their feedback published on the
+    # site as a testimonial. Default is *false* — opt-in, never opt-out.
+    publish_consent: bool = False
     cf_turnstile_token: Annotated[str | None, Field(default=None, max_length=3000)] = None
 
 
@@ -337,6 +346,112 @@ async def stripe_webhook(request: Request) -> dict[str, Any]:
     raw = await request.body()
     signature = request.headers.get("Stripe-Signature") or request.headers.get("stripe-signature")
     return await billing_module.handle_webhook(db, raw, signature)
+
+
+
+# ---------- Beta launch (first 100 users get free Premium) ----------
+class BetaClaimIn(BaseModel):
+    email: EmailStr
+    name: Annotated[str | None, Field(default=None, max_length=80)] = None
+
+
+@app.get("/api/beta/status")
+async def beta_status(email: str | None = None) -> dict[str, Any]:
+    return await beta_module.get_status(db, email)
+
+
+@app.post("/api/beta/claim")
+@limiter.limit("5/minute")
+async def beta_claim(request: Request, payload: BetaClaimIn = Body(...)) -> dict[str, Any]:
+    try:
+        result = await beta_module.claim(db, email=str(payload.email), name=payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # Fire premium-fulfilment emails for granted (not already-claimed,
+    # not waitlisted). Best-effort — failures are logged but don't fail
+    # the claim. The actual entitlement row is already persisted.
+    if result.get("result") == "granted":
+        await _send_premium_welcome(
+            email=str(payload.email),
+            name=payload.name or "",
+            plan_label="Beta — 90 days free",
+            expires_at_iso=result["expires_at"],
+        )
+
+    return result
+
+
+# ---------- Public testimonials ----------
+@app.get("/api/testimonials")
+async def public_testimonials(limit: int = 12) -> dict[str, Any]:
+    """Returns feedback rows that the user consented to publish AND that
+    an admin has approved (``published=true``). Excludes the email field
+    entirely. Used for the homepage testimonial strip."""
+    limit = max(1, min(50, int(limit)))
+    cursor = db.feedback.find(
+        {"publish_consent": True, "published": True},
+        {"_id": 0, "email": 0, "ticket_id": 0},
+    ).sort("created_at", -1).limit(limit)
+    items: list[dict[str, Any]] = []
+    async for row in cursor:
+        # Coerce datetimes into ISO strings for JSON.
+        if isinstance(row.get("created_at"), datetime):
+            row["created_at"] = row["created_at"].isoformat()
+        items.append(row)
+    return {"count": len(items), "testimonials": items}
+
+
+@app.post("/api/admin/feedback/{ticket_id}/publish", dependencies=[Depends(require_admin)])
+async def admin_publish_feedback(ticket_id: str, published: bool = True) -> dict[str, Any]:
+    """Admin-only toggle to approve a consented testimonial for display."""
+    res = await db.feedback.update_one(
+        {"ticket_id": ticket_id, "publish_consent": True},
+        {"$set": {"published": published, "updated_at": _now()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="ticket not found or consent not given")
+    return {"status": "ok", "ticket_id": ticket_id, "published": published}
+
+
+# ---------- Premium fulfilment helpers ----------
+async def _send_premium_welcome(
+    *, email: str, name: str, plan_label: str, expires_at_iso: str
+) -> None:
+    """Send the premium welcome email and queue the 10-planet report.
+    Idempotent at the email level: the caller controls when this fires
+    (typically once, immediately after entitlement grant).
+    """
+    try:
+        expires_dt = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+        expires_human = expires_dt.strftime("%B %-d, %Y")
+    except Exception:  # noqa: BLE001
+        expires_human = expires_at_iso
+
+    display_name = (name or email.split("@")[0]).strip() or "there"
+    try:
+        await email_service.send_template(
+            "premium_welcome",
+            to=email,
+            name=display_name,
+            plan_label=plan_label,
+            expires_at_human=expires_human,
+            unsubscribe_url=f"{APP_ORIGIN}/upgrade/manage",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Could not send premium_welcome email: %s", exc)
+
+    # The 10-planet report is the generic activation reading. It uses
+    # the existing template and ships immediately.
+    try:
+        await email_service.send_template(
+            "premium_10_planet",
+            to=email,
+            name=display_name,
+            unsubscribe_url=f"{APP_ORIGIN}/upgrade/manage",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Could not send premium_10_planet email: %s", exc)
 
 
 # ---------- Existing routes ----------
@@ -496,8 +611,15 @@ async def feedback(request: Request, payload: FeedbackIn = Body(...)) -> dict[st
         "name": payload.name,
         "email": payload.email,
         "rating": payload.rating,
+        "rating_accuracy": payload.rating_accuracy,
+        "rating_ui": payload.rating_ui,
+        "rating_ai_quality": payload.rating_ai_quality,
+        "rating_recommend": payload.rating_recommend,
         "category": payload.category,
         "message": payload.message,
+        "publish_consent": payload.publish_consent,
+        # Admin must approve before a consenting testimonial is shown.
+        "published": False,
         "created_at": _now(),
     })
 
