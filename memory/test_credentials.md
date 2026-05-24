@@ -43,7 +43,9 @@ There is **no end-user authentication** in the app.
 ## IndexNow (Bing / Yandex / Seznam / Naver instant indexing)
 
 - Key (in `/app/backend/.env` → `INDEXNOW_KEY`): `4729c06b46ab6d08e42fea100b787b91`
-- Verification file URL: `https://liveastrology.app/api/indexnow-key.txt` (returns the key as plain text)
+- Verification file URL (the one IndexNow fetches): `https://liveastrology.app/4729c06b46ab6d08e42fea100b787b91.txt` (static file in `frontend/public/`, returns the key as plain text — the spec-conventional root location).
+- Backup verification URL (also serves the key): `https://liveastrology.app/api/indexnow-key.txt`.
 - Manual submit endpoint: `POST /api/admin/indexnow/submit` with `{"urls": [...]}` (bearer auth).
-- Auto-pings: triggered on `POST /api/admin/articles` (when `status=published`) and on `PATCH` flipping draft → published.
+- Auto-pings: triggered on `POST /api/admin/articles` (when `status=published`) and on `PATCH` flipping draft → published. Each ping also includes `https://liveastrology.app/sitemap.xml` so Bing re-fetches the whole sitemap.
 - Test bypass: set `INDEXNOW_DISABLED=1` (already set in pytest fixtures).
+- `robots.txt` carries a discoverable `# IndexNow key:` comment so auditors can verify instant-indexing is live.

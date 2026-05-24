@@ -1684,7 +1684,7 @@ async def test_indexnow_submit_posts_to_endpoint_when_enabled(client, monkeypatc
     payload = captured["json"]
     assert payload["host"] == "liveastrology.app"
     assert payload["key"] == "testkey1234567890abcdef0987654321"
-    assert payload["keyLocation"].endswith("/api/indexnow-key.txt")
+    assert payload["keyLocation"].endswith("/testkey1234567890abcdef0987654321.txt")
     assert len(payload["urlList"]) == 2
 
 

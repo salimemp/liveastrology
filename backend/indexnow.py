@@ -52,7 +52,7 @@ def _key() -> str:
 def _key_location() -> str:
     return (
         os.environ.get("INDEXNOW_KEY_LOCATION", "").strip()
-        or f"{SITE_URL}/api/indexnow-key.txt"
+        or f"{SITE_URL}/{_key()}.txt"
     )
 
 
