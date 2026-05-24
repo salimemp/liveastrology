@@ -52,6 +52,7 @@ import beta as beta_module
 import billing as billing_module
 import compatibility_reports as compatibility_module
 import email_service
+import feeds as feeds_module
 import forecast as forecast_module
 import interpretation as interpretation_module
 import review_requests as review_requests_module
@@ -1307,6 +1308,40 @@ async def list_articles_public(limit: int = 50) -> list[dict[str, Any]]:
                 doc[k] = doc[k].isoformat()
         items.append(doc)
     return items
+
+
+async def _published_articles_for_feed(limit: int = 50) -> list[dict[str, Any]]:
+    """Pull up to ``limit`` newest published articles as raw dicts (with
+    datetime objects intact). Used by the RSS + Atom feed builders."""
+    cursor = db.articles.find(
+        {"status": "published"},
+        {"_id": 0, "content": 0},
+    ).sort("published_at", -1).limit(min(max(limit, 1), 100))
+    return [doc async for doc in cursor]
+
+
+@app.get("/api/feed.xml")
+async def rss_feed() -> PlainTextResponse:
+    """RSS 2.0 feed of the 50 most recent published articles."""
+    articles = await _published_articles_for_feed(limit=50)
+    xml = feeds_module.build_rss(articles)
+    return PlainTextResponse(
+        xml,
+        media_type="application/rss+xml; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=900"},
+    )
+
+
+@app.get("/api/atom.xml")
+async def atom_feed() -> PlainTextResponse:
+    """Atom 1.0 feed of the 50 most recent published articles."""
+    articles = await _published_articles_for_feed(limit=50)
+    xml = feeds_module.build_atom(articles)
+    return PlainTextResponse(
+        xml,
+        media_type="application/atom+xml; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=900"},
+    )
 
 
 @app.get("/api/articles/{slug}")

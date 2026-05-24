@@ -1462,3 +1462,142 @@ async def test_review_requests_dry_run_does_not_send(client, sent_emails):
     count = await mock_db.review_requests.count_documents({})
     assert count == 0
 
+
+# ---------- RSS + Atom feeds ----------
+LONG_FEED_CONTENT = ("Plain English sentence. " * 60).strip()
+
+
+async def _seed_two_published_articles(ac):
+    """Helper: create two published articles via the admin API."""
+    headers = {"Authorization": "Bearer test-admin-secret"}
+    await ac.post("/api/admin/articles", headers=headers, json={
+        "title": "Big Three Explained",
+        "excerpt": "What Sun, Moon and Rising actually mean.",
+        "content": LONG_FEED_CONTENT,
+        "author": "Live Astrology Editorial",
+        "category": "Astrology Basics",
+        "status": "published",
+    })
+    await ac.post("/api/admin/articles", headers=headers, json={
+        "title": "Mercury Retrograde Survival Kit",
+        "excerpt": "Plain-English guide to the three weeks of chaos.",
+        "content": LONG_FEED_CONTENT,
+        "author": "Live Astrology Editorial",
+        "category": "Transits",
+        "status": "published",
+    })
+    # And one draft — it must NOT appear in the feeds.
+    await ac.post("/api/admin/articles", headers=headers, json={
+        "title": "Secret Draft Post",
+        "excerpt": "Should not be visible publicly.",
+        "content": LONG_FEED_CONTENT,
+        "author": "Editor",
+        "category": "Drafts",
+        "status": "draft",
+    })
+
+
+async def test_rss_feed_returns_valid_xml(client):
+    ac, _ = client
+    await _seed_two_published_articles(ac)
+
+    r = await ac.get("/api/feed.xml")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/rss+xml")
+    assert "max-age=900" in r.headers.get("cache-control", "")
+
+    body = r.text
+    # XML preamble + RSS root
+    assert body.startswith('<?xml version="1.0"')
+    assert '<rss version="2.0"' in body
+    assert "<channel>" in body
+    assert "<title>Live Astrology — Articles</title>" in body
+    # Both published articles present, draft is excluded
+    assert "Big Three Explained" in body
+    assert "Mercury Retrograde Survival Kit" in body
+    assert "Secret Draft Post" not in body
+    # Items have canonical URLs and GUIDs
+    assert "https://liveastrology.app/articles/big-three-explained" in body
+    assert '<guid isPermaLink="true">' in body
+    # Self-link advertised
+    assert '<atom:link href="https://liveastrology.app/api/feed.xml"' in body
+
+    # Parse with the stdlib to confirm well-formed XML
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(body)
+    items = root.findall("./channel/item")
+    assert len(items) == 2
+
+
+async def test_atom_feed_returns_valid_xml(client):
+    ac, _ = client
+    await _seed_two_published_articles(ac)
+
+    r = await ac.get("/api/atom.xml")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/atom+xml")
+
+    body = r.text
+    assert body.startswith('<?xml version="1.0"')
+    assert 'xmlns="http://www.w3.org/2005/Atom"' in body
+    # Both published articles present, draft excluded
+    assert "Big Three Explained" in body
+    assert "Mercury Retrograde Survival Kit" in body
+    assert "Secret Draft Post" not in body
+    # Self-link advertised
+    assert 'href="https://liveastrology.app/api/atom.xml"' in body
+
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(body)
+    ns = "{http://www.w3.org/2005/Atom}"
+    entries = root.findall(f"./{ns}entry")
+    assert len(entries) == 2
+    # Each entry has the required elements
+    for entry in entries:
+        assert entry.find(f"./{ns}id") is not None
+        assert entry.find(f"./{ns}updated") is not None
+        assert entry.find(f"./{ns}link") is not None
+
+
+async def test_feeds_handle_empty_articles_collection(client):
+    ac, _ = client
+    rss = await ac.get("/api/feed.xml")
+    atom = await ac.get("/api/atom.xml")
+    assert rss.status_code == 200
+    assert atom.status_code == 200
+    # Both must still be valid XML with no <item>/<entry>
+    import xml.etree.ElementTree as ET
+    rss_root = ET.fromstring(rss.text)
+    atom_root = ET.fromstring(atom.text)
+    assert rss_root.findall("./channel/item") == []
+    ns = "{http://www.w3.org/2005/Atom}"
+    assert atom_root.findall(f"./{ns}entry") == []
+
+
+async def test_feeds_escape_xml_special_characters(client):
+    """Titles or excerpts with <, >, & must not break the XML."""
+    ac, _ = client
+    headers = {"Authorization": "Bearer test-admin-secret"}
+    await ac.post("/api/admin/articles", headers=headers, json={
+        "title": "Sun & Moon — what's the difference?",
+        "excerpt": "<script>alert(1)</script> — Plain-English answer.",
+        "content": LONG_FEED_CONTENT,
+        "author": "Editor",
+        "category": "Basics",
+        "status": "published",
+    })
+
+    rss = await ac.get("/api/feed.xml")
+    atom = await ac.get("/api/atom.xml")
+
+    # Must NOT contain unescaped angle brackets from the excerpt
+    assert "<script>alert(1)</script>" not in rss.text
+    assert "<script>alert(1)</script>" not in atom.text
+    assert "&amp;" in rss.text  # the title's ampersand must be encoded
+    assert "&lt;script&gt;" in rss.text
+
+    # Both must still parse as valid XML
+    import xml.etree.ElementTree as ET
+    ET.fromstring(rss.text)
+    ET.fromstring(atom.text)
+

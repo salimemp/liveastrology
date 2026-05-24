@@ -85,6 +85,15 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2n · RSS 2.0 + Atom 1.0 feeds (SEO/GEO discoverability)
+- ✅ **`/api/feed.xml`** (RSS 2.0) and **`/api/atom.xml`** (Atom 1.0) — new `backend/feeds.py` module renders the 50 newest published articles as spec-compliant XML with proper XML escaping, RFC 822 / RFC 3339 timestamps, stable GUIDs (`{site}/articles/{slug}`), self-links, and `application/rss+xml` / `application/atom+xml` content types. 15-min CDN caching.
+- ✅ **Discovery wiring** — `<link rel="alternate" type="application/rss+xml" …>` and `application/atom+xml` added to `liveastrology/index.html`. Both feed URLs added to `sitemap.xml` with `changefreq=daily`. Aggregators (Feedly, Google News, Perplexity, ChatGPT-search) can auto-discover.
+- ✅ Privacy: only `excerpt` is emitted, not full article body — engagement stays on liveastrology.app.
+- ✅ Test suite: **85 unit tests green** (81 prior + 4 new feed tests covering RSS XML shape, Atom XML shape, empty-collection edge case, XML escaping of titles/excerpts with `<`, `>`, `&`).
+- 🔁 Live verification against preview: both feeds return 200 with 11 published SEO articles, valid XML parses, draft articles excluded as expected.
+
+
+
 ### 2026-02-14 · Session 2m · Day-60 review-ask cron + workflow hardening
 - ✅ **Day-60 review-ask cron** — new `/app/backend/review_requests.py` finds beta claimants whose `created_at <= now - 60d` AND `expires_at >= now + 7d`, sends a Trustpilot + Product Hunt review request via the new `premium_review_ask` template (`12-day-60-review-request.html/.txt`), and records the dispatch in `review_requests` (idempotent — one email per address, ever). Admin endpoint `POST /api/admin/premium/dispatch-review-requests` with optional `dry_run`. Daily GitHub Action `/app/.github/workflows/day-60-review-request.yml` (10:00 UTC) calls it.
 - ✅ **GitHub Actions workflow hardening** — patched `monthly-forecast.yml` to use the same `mktemp + %{http_code} + cat body` pattern as `weekly-horoscope.yml` so failures surface the HTTP code and response body in the Actions log (was silently exiting 22 on `curl -fsS`). Same pattern applied to the new day-60 workflow. Includes a hint that 404s mean production is missing the latest endpoint and needs a redeploy.
