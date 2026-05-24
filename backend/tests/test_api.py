@@ -1601,3 +1601,233 @@ async def test_feeds_escape_xml_special_characters(client):
     ET.fromstring(rss.text)
     ET.fromstring(atom.text)
 
+
+# ---------- IndexNow ----------
+async def test_indexnow_key_file_returns_configured_key(client, monkeypatch):
+    """GET /api/indexnow-key.txt must return the INDEXNOW_KEY as plain text."""
+    monkeypatch.setenv("INDEXNOW_KEY", "abc123deadbeefcafef00d1234567890")
+    ac, _ = client
+    r = await ac.get("/api/indexnow-key.txt")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert r.text == "abc123deadbeefcafef00d1234567890"
+
+
+async def test_indexnow_key_file_404_when_unset(client, monkeypatch):
+    monkeypatch.setenv("INDEXNOW_KEY", "")
+    ac, _ = client
+    r = await ac.get("/api/indexnow-key.txt")
+    assert r.status_code == 404
+
+
+async def test_indexnow_submit_requires_admin(client):
+    ac, _ = client
+    r = await ac.post("/api/admin/indexnow/submit", json={"urls": ["https://liveastrology.app/"]})
+    assert r.status_code == 401
+
+
+async def test_indexnow_submit_skipped_when_disabled(client):
+    """With INDEXNOW_DISABLED=1 (set by conftest), submit returns
+    skipped without hitting the network."""
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/indexnow/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"urls": ["https://liveastrology.app/articles/foo"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "skipped"
+    assert body["reason"] == "INDEXNOW_DISABLED=1"
+    assert body["urls"] == ["https://liveastrology.app/articles/foo"]
+
+
+async def test_indexnow_submit_posts_to_endpoint_when_enabled(client, monkeypatch):
+    """When IndexNow is enabled, submit POSTs the right payload to
+    api.indexnow.org and returns ok on a 200."""
+    monkeypatch.setenv("INDEXNOW_DISABLED", "0")
+    monkeypatch.setenv("INDEXNOW_KEY", "testkey1234567890abcdef0987654321")
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResp()
+
+    import indexnow
+    monkeypatch.setattr(indexnow.httpx, "AsyncClient", _FakeClient)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/indexnow/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"urls": [
+            "https://liveastrology.app/articles/foo",
+            "https://liveastrology.app/articles/bar",
+        ]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["http_status"] == 200
+    assert body["submitted"] == 2
+    assert captured["url"] == "https://api.indexnow.org/IndexNow"
+    payload = captured["json"]
+    assert payload["host"] == "liveastrology.app"
+    assert payload["key"] == "testkey1234567890abcdef0987654321"
+    assert payload["keyLocation"].endswith("/api/indexnow-key.txt")
+    assert len(payload["urlList"]) == 2
+
+
+async def test_indexnow_submit_returns_failed_on_non_2xx(client, monkeypatch):
+    monkeypatch.setenv("INDEXNOW_DISABLED", "0")
+    monkeypatch.setenv("INDEXNOW_KEY", "testkey1234567890abcdef0987654321")
+
+    class _FakeResp:
+        status_code = 403
+        text = "key file not found"
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            return _FakeResp()
+
+    import indexnow
+    monkeypatch.setattr(indexnow.httpx, "AsyncClient", _FakeClient)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/indexnow/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"urls": ["https://liveastrology.app/"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["http_status"] == 403
+    assert "key file not found" in body["body"]
+
+
+async def test_indexnow_submit_validates_url_list(client):
+    """An empty URL list is rejected by the Pydantic min_length=1 guard."""
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/indexnow/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"urls": []},
+    )
+    assert r.status_code == 422
+
+
+async def test_publishing_an_article_triggers_indexnow_ping(client, monkeypatch):
+    """Creating a published article schedules a background IndexNow ping
+    with the article's canonical URL. With INDEXNOW_DISABLED=1 (conftest),
+    the call still runs synchronously through ``submit`` and returns
+    skipped — we assert the URL list reached the module."""
+    received: list[list[str]] = []
+
+    import indexnow
+
+    async def fake_submit(urls):
+        received.append(list(urls))
+        return {"status": "skipped", "reason": "test-fake"}
+
+    # Patch submit; submit_in_background calls it via loop.create_task,
+    # which we'll force-await by patching that too.
+    monkeypatch.setattr(indexnow, "submit", fake_submit)
+
+    async def fake_in_background(urls):
+        await fake_submit(urls)
+
+    monkeypatch.setattr(indexnow, "submit_in_background", fake_in_background)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "IndexNow Demo Article",
+            "excerpt": "A short summary.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Editor",
+            "category": "Basics",
+            "status": "published",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert received == [["https://liveastrology.app/articles/indexnow-demo-article"]]
+
+
+async def test_drafts_do_not_trigger_indexnow_ping(client, monkeypatch):
+    """Creating a draft article must NOT ping IndexNow."""
+    received: list[list[str]] = []
+
+    import indexnow
+
+    async def fake_in_background(urls):
+        received.append(list(urls))
+
+    monkeypatch.setattr(indexnow, "submit_in_background", fake_in_background)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Draft Article",
+            "excerpt": "Won't ping IndexNow.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Editor",
+            "category": "Basics",
+            "status": "draft",
+        },
+    )
+    assert r.status_code == 201
+    assert received == []
+
+
+async def test_flipping_draft_to_published_triggers_indexnow_ping(client, monkeypatch):
+    received: list[list[str]] = []
+    import indexnow
+
+    async def fake_in_background(urls):
+        received.append(list(urls))
+
+    monkeypatch.setattr(indexnow, "submit_in_background", fake_in_background)
+
+    ac, _ = client
+    # Create the draft first (no ping)
+    await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Flip Me To Published",
+            "excerpt": "Starts as a draft.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Editor",
+            "category": "Basics",
+            "status": "draft",
+        },
+    )
+    assert received == []
+
+    # Flip to published — must ping
+    r = await ac.patch(
+        "/api/admin/articles/flip-me-to-published",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"status": "published"},
+    )
+    assert r.status_code == 200
+    assert received == [["https://liveastrology.app/articles/flip-me-to-published"]]
+

@@ -38,3 +38,12 @@ There is **no end-user authentication** in the app.
 - Secret (in `/app/backend/.env` → `CF_TURNSTILE_SECRET`):
   `0x4AAAAAADExRnUFTnX-fhVqfeVZkrWfEKs`
 - Test bypass: set `TURNSTILE_DISABLED=1` (already set in pytest fixtures).
+
+
+## IndexNow (Bing / Yandex / Seznam / Naver instant indexing)
+
+- Key (in `/app/backend/.env` → `INDEXNOW_KEY`): `4729c06b46ab6d08e42fea100b787b91`
+- Verification file URL: `https://liveastrology.app/api/indexnow-key.txt` (returns the key as plain text)
+- Manual submit endpoint: `POST /api/admin/indexnow/submit` with `{"urls": [...]}` (bearer auth).
+- Auto-pings: triggered on `POST /api/admin/articles` (when `status=published`) and on `PATCH` flipping draft → published.
+- Test bypass: set `INDEXNOW_DISABLED=1` (already set in pytest fixtures).

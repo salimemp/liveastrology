@@ -54,6 +54,7 @@ import compatibility_reports as compatibility_module
 import email_service
 import feeds as feeds_module
 import forecast as forecast_module
+import indexnow as indexnow_module
 import interpretation as interpretation_module
 import review_requests as review_requests_module
 import scheduler as scheduler_module
@@ -1344,6 +1345,36 @@ async def atom_feed() -> PlainTextResponse:
     )
 
 
+# ---------- IndexNow (instant URL indexing on Bing / Yandex / Seznam / Naver) ----------
+@app.get("/api/indexnow-key.txt")
+async def indexnow_key_file() -> PlainTextResponse:
+    """Plain-text verification file referenced by IndexNow's ``keyLocation``.
+
+    Search engines fetch this URL and compare its body against the
+    ``key`` in our POST payload. The contents must equal the key
+    exactly — no whitespace, no newlines.
+    """
+    key = os.environ.get("INDEXNOW_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=404, detail="INDEXNOW_KEY not configured")
+    return PlainTextResponse(key, media_type="text/plain; charset=utf-8")
+
+
+class IndexNowSubmitIn(BaseModel):
+    urls: list[Annotated[str, Field(min_length=1, max_length=2000)]] = Field(min_length=1, max_length=10000)
+
+
+@app.post("/api/admin/indexnow/submit", dependencies=[Depends(require_admin)])
+async def indexnow_submit(payload: IndexNowSubmitIn = Body(...)) -> dict[str, Any]:
+    """Manually submit a list of URLs to IndexNow.
+
+    Use this to (a) reindex after a site-wide change, or (b) bulk-submit
+    older articles you want recrawled. Daily limit per the spec is
+    10,000 URLs; we cap the request body at the same number.
+    """
+    return await indexnow_module.submit(payload.urls)
+
+
 @app.get("/api/articles/{slug}")
 async def get_article_public(slug: str) -> dict[str, Any]:
     doc = await db.articles.find_one({"slug": slug, "status": "published"}, {"_id": 0})
@@ -1392,6 +1423,8 @@ async def create_article(payload: ArticleIn) -> dict[str, Any]:
     for k in ("created_at", "updated_at", "published_at"):
         if isinstance(doc.get(k), datetime):
             doc[k] = doc[k].isoformat()
+    if doc.get("status") == "published":
+        await indexnow_module.submit_in_background([indexnow_module.url_for_article(slug)])
     return doc
 
 
@@ -1412,11 +1445,13 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
         if not (patch.read_time or existing.get("read_time")):
             minutes = max(1, round(update_fields["word_count"] / 220))
             update_fields["read_time"] = f"{minutes} min read"
+    newly_published = False
     if patch.status is not None:
         if patch.status not in {"draft", "published"}:
             raise HTTPException(status_code=400, detail="status must be 'draft' or 'published'")
         if patch.status == "published" and not existing.get("published_at"):
             update_fields["published_at"] = _now()
+            newly_published = True
     update_fields["updated_at"] = _now()
 
     await db.articles.update_one({"slug": slug}, {"$set": update_fields})
@@ -1424,6 +1459,9 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
     for k in ("created_at", "updated_at", "published_at"):
         if isinstance(doc.get(k), datetime):
             doc[k] = doc[k].isoformat()
+    # Re-ping IndexNow when the article transitions into "published".
+    if newly_published or (patch.content is not None and doc.get("status") == "published"):
+        await indexnow_module.submit_in_background([indexnow_module.url_for_article(slug)])
     return doc
 
 

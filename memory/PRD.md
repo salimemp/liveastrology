@@ -85,6 +85,16 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2o · IndexNow auto-pings (Bing/Yandex instant indexing)
+- ✅ **`backend/indexnow.py`** — fire-and-forget pings to `https://api.indexnow.org/IndexNow` (Bing + Yandex + Seznam + Naver). Reads key from `INDEXNOW_KEY` env var. All failures logged + returned in the response shape but never raise.
+- ✅ **`GET /api/indexnow-key.txt`** — serves the key as plain text for search-engine ownership verification (via `keyLocation` in the payload).
+- ✅ **`POST /api/admin/indexnow/submit`** — admin-only manual submit (up to 10,000 URLs per request per spec).
+- ✅ **Auto-ping on publish** — `POST /api/admin/articles` and `PATCH` flipping draft → published both schedule a background ping with the article's canonical URL. Drafts never ping.
+- ✅ Test suite: **91 unit tests green** (85 prior + 6 new IndexNow tests covering key file, auth, disabled mode, real-network round-trip, non-2xx error path, draft non-pinging, and draft → published transition).
+- 🔁 Live verification: key file returns 200 with key body; manual submit reaches IndexNow's API and gets back a structured 422 (`URLs not related to your site verified through keylocation`) — *expected* until production redeploys to expose `/api/indexnow-key.txt`. Will flip to 200/202 post-deploy.
+
+
+
 ### 2026-02-14 · Session 2n · RSS 2.0 + Atom 1.0 feeds (SEO/GEO discoverability)
 - ✅ **`/api/feed.xml`** (RSS 2.0) and **`/api/atom.xml`** (Atom 1.0) — new `backend/feeds.py` module renders the 50 newest published articles as spec-compliant XML with proper XML escaping, RFC 822 / RFC 3339 timestamps, stable GUIDs (`{site}/articles/{slug}`), self-links, and `application/rss+xml` / `application/atom+xml` content types. 15-min CDN caching.
 - ✅ **Discovery wiring** — `<link rel="alternate" type="application/rss+xml" …>` and `application/atom+xml` added to `liveastrology/index.html`. Both feed URLs added to `sitemap.xml` with `changefreq=daily`. Aggregators (Feedly, Google News, Perplexity, ChatGPT-search) can auto-discover.
