@@ -1766,7 +1766,10 @@ async def test_publishing_an_article_triggers_indexnow_ping(client, monkeypatch)
         },
     )
     assert r.status_code == 201, r.text
-    assert received == [["https://liveastrology.app/articles/indexnow-demo-article"]]
+    assert received == [[
+        "https://liveastrology.app/articles/indexnow-demo-article",
+        "https://liveastrology.app/sitemap.xml",
+    ]]
 
 
 async def test_drafts_do_not_trigger_indexnow_ping(client, monkeypatch):
@@ -1829,5 +1832,8 @@ async def test_flipping_draft_to_published_triggers_indexnow_ping(client, monkey
         json={"status": "published"},
     )
     assert r.status_code == 200
-    assert received == [["https://liveastrology.app/articles/flip-me-to-published"]]
+    assert received == [[
+        "https://liveastrology.app/articles/flip-me-to-published",
+        "https://liveastrology.app/sitemap.xml",
+    ]]
 

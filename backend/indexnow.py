@@ -40,6 +40,7 @@ import httpx
 logger = logging.getLogger("liveastrology.indexnow")
 
 SITE_URL = "https://liveastrology.app"
+SITEMAP_URL = f"{SITE_URL}/sitemap.xml"
 ENDPOINT = "https://api.indexnow.org/IndexNow"
 TIMEOUT_SECONDS = 8.0
 

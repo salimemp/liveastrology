@@ -1424,7 +1424,10 @@ async def create_article(payload: ArticleIn) -> dict[str, Any]:
         if isinstance(doc.get(k), datetime):
             doc[k] = doc[k].isoformat()
     if doc.get("status") == "published":
-        await indexnow_module.submit_in_background([indexnow_module.url_for_article(slug)])
+        await indexnow_module.submit_in_background([
+            indexnow_module.url_for_article(slug),
+            indexnow_module.SITEMAP_URL,
+        ])
     return doc
 
 
@@ -1461,7 +1464,10 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
             doc[k] = doc[k].isoformat()
     # Re-ping IndexNow when the article transitions into "published".
     if newly_published or (patch.content is not None and doc.get("status") == "published"):
-        await indexnow_module.submit_in_background([indexnow_module.url_for_article(slug)])
+        await indexnow_module.submit_in_background([
+            indexnow_module.url_for_article(slug),
+            indexnow_module.SITEMAP_URL,
+        ])
     return doc
 
 
