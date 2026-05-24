@@ -30,6 +30,7 @@ os.environ.setdefault("ADMIN_SECRET", "test-admin-secret")
 os.environ.setdefault("TURNSTILE_DISABLED", "1")
 os.environ.setdefault("RESEND_WEBHOOK_SECRET", "")
 os.environ.setdefault("INDEXNOW_DISABLED", "1")
+os.environ.setdefault("GOOGLE_INDEXING_DISABLED", "1")
 
 
 @pytest.fixture

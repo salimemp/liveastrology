@@ -54,6 +54,7 @@ import compatibility_reports as compatibility_module
 import email_service
 import feeds as feeds_module
 import forecast as forecast_module
+import google_indexing as google_indexing_module
 import indexnow as indexnow_module
 import interpretation as interpretation_module
 import review_requests as review_requests_module
@@ -1375,6 +1376,23 @@ async def indexnow_submit(payload: IndexNowSubmitIn = Body(...)) -> dict[str, An
     return await indexnow_module.submit(payload.urls)
 
 
+# ---------- Google Indexing API ----------
+class GoogleIndexingSubmitIn(BaseModel):
+    url: Annotated[str, Field(min_length=1, max_length=2000)]
+    action: Annotated[str, Field(pattern="^(URL_UPDATED|URL_DELETED)$")] = "URL_UPDATED"
+
+
+@app.post("/api/admin/google-indexing/submit", dependencies=[Depends(require_admin)])
+async def google_indexing_submit(payload: GoogleIndexingSubmitIn = Body(...)) -> dict[str, Any]:
+    """Manually notify Google's Indexing API of a single URL.
+
+    Auto-pings already fire on article publish — this endpoint is for
+    one-off reindex requests (e.g. when a static page is significantly
+    rewritten, or to seed the queue with existing URLs).
+    """
+    return await google_indexing_module.submit(payload.url, action=payload.action)
+
+
 @app.get("/api/articles/{slug}")
 async def get_article_public(slug: str) -> dict[str, Any]:
     doc = await db.articles.find_one({"slug": slug, "status": "published"}, {"_id": 0})
@@ -1428,6 +1446,9 @@ async def create_article(payload: ArticleIn) -> dict[str, Any]:
             indexnow_module.url_for_article(slug),
             indexnow_module.SITEMAP_URL,
         ])
+        await google_indexing_module.submit_in_background(
+            indexnow_module.url_for_article(slug)
+        )
     return doc
 
 
@@ -1462,12 +1483,15 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
     for k in ("created_at", "updated_at", "published_at"):
         if isinstance(doc.get(k), datetime):
             doc[k] = doc[k].isoformat()
-    # Re-ping IndexNow when the article transitions into "published".
+    # Re-ping IndexNow + Google when the article transitions into "published".
     if newly_published or (patch.content is not None and doc.get("status") == "published"):
         await indexnow_module.submit_in_background([
             indexnow_module.url_for_article(slug),
             indexnow_module.SITEMAP_URL,
         ])
+        await google_indexing_module.submit_in_background(
+            indexnow_module.url_for_article(slug)
+        )
     return doc
 
 
