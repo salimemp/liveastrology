@@ -85,6 +85,15 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2q · Dedicated SEO_WORKFLOW_TOKEN (narrow-scope automation)
+- ✅ **`SEO_WORKFLOW_TOKEN` env var** — a second bearer token, separate from `ADMIN_SECRET`, that lets external SEO automation (Arvow / Claude Code / Blotato / n8n) publish articles + ping indexing engines without having full admin reach.
+- ✅ **New `require_seo_or_admin` dependency** in `server.py` — accepts EITHER token. Returns 503 if both env vars are unset, 401 on token mismatch.
+- ✅ **9 endpoints widened** to accept the SEO token: article list/read/create/update/delete, seed-articles, seed-seo-articles, IndexNow submit, Google Indexing submit. *Every other admin endpoint stays `require_admin`-only* (subscribers, feedback, contacts, stats, CSV, weekly/monthly/review-ask dispatches, compatibility send, testimonial moderation, subscriber actions, Stripe portal).
+- ✅ Test suite: **105 unit tests green** (99 prior + 6 new: SEO token creates article, SEO token patches+deletes, SEO token submits IndexNow + Google, SEO token rejected on 8 protected admin endpoints, invalid token rejected everywhere, ADMIN_SECRET backwards-compat preserved).
+- 🔁 Live verification: SEO token returns 200 on `/api/admin/articles` + `/api/admin/indexnow/submit`, returns 401 on `/api/admin/subscribers` + `/api/admin/premium/dispatch-monthly-forecast`. Random tokens rejected everywhere.
+
+
+
 ### 2026-02-14 · Session 2p · Google Indexing API (alongside IndexNow)
 - ✅ **`backend/google_indexing.py`** — async-friendly Google Indexing API client. Loads service-account JSON, caches OAuth token + expiry on a module-level Credentials object, refreshes via `asyncio.to_thread` so the event loop stays unblocked, posts `URL_UPDATED`/`URL_DELETED` payloads via `httpx.AsyncClient`. Never raises.
 - ✅ **`POST /api/admin/google-indexing/submit`** — admin-only manual submit for single URLs (`URL_UPDATED` or `URL_DELETED`).

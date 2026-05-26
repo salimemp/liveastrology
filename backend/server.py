@@ -70,6 +70,7 @@ NOTIFY_EMAIL  = os.environ.get("NOTIFY_EMAIL", "notify@liveastrology.app")
 MONGO_URL     = os.environ["MONGO_URL"]
 DB_NAME       = os.environ["DB_NAME"]
 ADMIN_SECRET  = os.environ.get("ADMIN_SECRET", "")
+SEO_WORKFLOW_TOKEN = os.environ.get("SEO_WORKFLOW_TOKEN", "")
 RESEND_WEBHOOK_SECRET = os.environ.get("RESEND_WEBHOOK_SECRET", "")
 
 # ---------- DB ----------
@@ -135,6 +136,23 @@ def require_admin(authorization: str = Header(default="")) -> None:
         raise HTTPException(status_code=503, detail="ADMIN_SECRET is not configured")
     expected = f"Bearer {ADMIN_SECRET}"
     if authorization != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_seo_or_admin(authorization: str = Header(default="")) -> None:
+    """Accepts EITHER ``ADMIN_SECRET`` or ``SEO_WORKFLOW_TOKEN``.
+
+    Used to gate the article-CMS + indexing endpoints so external SEO
+    automation (Arvow / Blotato / Claude Code) can publish without being
+    granted full admin reach over subscribers, billing, etc.
+    """
+    if not ADMIN_SECRET and not SEO_WORKFLOW_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Neither ADMIN_SECRET nor SEO_WORKFLOW_TOKEN is configured",
+        )
+    valid_tokens = {f"Bearer {t}" for t in (ADMIN_SECRET, SEO_WORKFLOW_TOKEN) if t}
+    if authorization not in valid_tokens:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -1154,7 +1172,7 @@ _SEED_ARTICLES: list[dict[str, Any]] = [
 ]
 
 
-@app.post("/api/admin/seed-articles", dependencies=[Depends(require_admin)])
+@app.post("/api/admin/seed-articles", dependencies=[Depends(require_seo_or_admin)])
 async def seed_articles_endpoint(force: bool = False) -> dict[str, Any]:
     """One-shot seeder for production. Idempotent: skips when the
     collection already has documents (unless ``force=true`` is passed,
@@ -1197,7 +1215,7 @@ async def seed_articles_endpoint(force: bool = False) -> dict[str, Any]:
     return {"status": "ok", "inserted": inserted, "skipped": skipped, "total_now": existing_count + inserted}
 
 
-@app.post("/api/admin/seed-seo-articles", dependencies=[Depends(require_admin)])
+@app.post("/api/admin/seed-seo-articles", dependencies=[Depends(require_seo_or_admin)])
 async def seed_seo_articles_endpoint(force: bool = False) -> dict[str, Any]:
     """Insert the 5 long-form SEO articles (Moon in Scorpio, Big Three
     comparison, no-signup positioning, beginner birth-chart guides) into
@@ -1365,7 +1383,7 @@ class IndexNowSubmitIn(BaseModel):
     urls: list[Annotated[str, Field(min_length=1, max_length=2000)]] = Field(min_length=1, max_length=10000)
 
 
-@app.post("/api/admin/indexnow/submit", dependencies=[Depends(require_admin)])
+@app.post("/api/admin/indexnow/submit", dependencies=[Depends(require_seo_or_admin)])
 async def indexnow_submit(payload: IndexNowSubmitIn = Body(...)) -> dict[str, Any]:
     """Manually submit a list of URLs to IndexNow.
 
@@ -1382,7 +1400,7 @@ class GoogleIndexingSubmitIn(BaseModel):
     action: Annotated[str, Field(pattern="^(URL_UPDATED|URL_DELETED)$")] = "URL_UPDATED"
 
 
-@app.post("/api/admin/google-indexing/submit", dependencies=[Depends(require_admin)])
+@app.post("/api/admin/google-indexing/submit", dependencies=[Depends(require_seo_or_admin)])
 async def google_indexing_submit(payload: GoogleIndexingSubmitIn = Body(...)) -> dict[str, Any]:
     """Manually notify Google's Indexing API of a single URL.
 
@@ -1404,7 +1422,7 @@ async def get_article_public(slug: str) -> dict[str, Any]:
     return doc
 
 
-@app.get("/api/admin/articles", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/articles", dependencies=[Depends(require_seo_or_admin)])
 async def list_articles_admin() -> list[dict[str, Any]]:
     cursor = db.articles.find({}, {"_id": 0, "content": 0}).sort("updated_at", -1)
     items = []
@@ -1416,7 +1434,7 @@ async def list_articles_admin() -> list[dict[str, Any]]:
     return items
 
 
-@app.get("/api/admin/articles/{slug}", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/articles/{slug}", dependencies=[Depends(require_seo_or_admin)])
 async def get_article_admin(slug: str) -> dict[str, Any]:
     doc = await db.articles.find_one({"slug": slug}, {"_id": 0})
     if not doc:
@@ -1427,7 +1445,7 @@ async def get_article_admin(slug: str) -> dict[str, Any]:
     return doc
 
 
-@app.post("/api/admin/articles", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+@app.post("/api/admin/articles", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_seo_or_admin)])
 async def create_article(payload: ArticleIn) -> dict[str, Any]:
     base_slug = _slugify(payload.slug or payload.title)
     slug = base_slug
@@ -1452,7 +1470,7 @@ async def create_article(payload: ArticleIn) -> dict[str, Any]:
     return doc
 
 
-@app.patch("/api/admin/articles/{slug}", dependencies=[Depends(require_admin)])
+@app.patch("/api/admin/articles/{slug}", dependencies=[Depends(require_seo_or_admin)])
 async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
     existing = await db.articles.find_one({"slug": slug}, {"_id": 0})
     if not existing:
@@ -1495,7 +1513,7 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
     return doc
 
 
-@app.delete("/api/admin/articles/{slug}", dependencies=[Depends(require_admin)])
+@app.delete("/api/admin/articles/{slug}", dependencies=[Depends(require_seo_or_admin)])
 async def delete_article(slug: str) -> dict[str, Any]:
     res = await db.articles.delete_one({"slug": slug})
     if res.deleted_count == 0:

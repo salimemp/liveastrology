@@ -2036,3 +2036,130 @@ async def test_drafts_do_not_trigger_google_indexing(client, monkeypatch):
     )
     assert r.status_code == 201
     assert google_calls == []
+
+
+# ---------- SEO_WORKFLOW_TOKEN scope ----------
+SEO_TOKEN = "test-seo-workflow-token"
+SEO_HEADERS = {"Authorization": f"Bearer {SEO_TOKEN}"}
+
+
+async def test_seo_token_can_create_article(client):
+    """SEO token must be accepted on POST /api/admin/articles."""
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers=SEO_HEADERS,
+        json={
+            "title": "Article From SEO Workflow",
+            "excerpt": "Published by Arvow / Claude Code via the dedicated token.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Automation",
+            "category": "Basics",
+            "status": "published",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["slug"] == "article-from-seo-workflow"
+
+
+async def test_seo_token_can_patch_and_delete_article(client):
+    ac, _ = client
+    # Seed via SEO token
+    await ac.post(
+        "/api/admin/articles",
+        headers=SEO_HEADERS,
+        json={
+            "title": "Seed Workflow Edit",
+            "excerpt": "Will be edited and then deleted.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Automation",
+            "category": "Basics",
+            "status": "draft",
+        },
+    )
+    # PATCH via SEO token
+    r = await ac.patch(
+        "/api/admin/articles/seed-workflow-edit",
+        headers=SEO_HEADERS,
+        json={"status": "published"},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "published"
+
+    # DELETE via SEO token
+    r = await ac.delete("/api/admin/articles/seed-workflow-edit", headers=SEO_HEADERS)
+    assert r.status_code == 200
+
+
+async def test_seo_token_can_submit_indexnow_and_google(client):
+    """SEO token must reach the indexing endpoints (both disabled in
+    tests, so we assert the auth gate lets the request through rather
+    than 401)."""
+    ac, _ = client
+    r1 = await ac.post(
+        "/api/admin/indexnow/submit",
+        headers=SEO_HEADERS,
+        json={"urls": ["https://liveastrology.app/"]},
+    )
+    assert r1.status_code == 200, r1.text  # NOT 401
+
+    r2 = await ac.post(
+        "/api/admin/google-indexing/submit",
+        headers=SEO_HEADERS,
+        json={"url": "https://liveastrology.app/"},
+    )
+    assert r2.status_code == 200, r2.text  # NOT 401
+
+
+async def test_seo_token_is_rejected_on_non_article_admin_endpoints(client):
+    """SEO token must NOT grant access to subscribers, feedback queue,
+    billing, premium dispatches, or testimonial moderation — those stay
+    ADMIN_SECRET-only."""
+    ac, _ = client
+    locked_endpoints = [
+        ("GET",   "/api/admin/subscribers",            None),
+        ("GET",   "/api/admin/feedback",               None),
+        ("GET",   "/api/admin/contacts",               None),
+        ("GET",   "/api/admin/stats",                  None),
+        ("GET",   "/api/admin/subscribers.csv",        None),
+        ("POST",  "/api/admin/dispatch-weekly",        None),
+        ("POST",  "/api/admin/premium/dispatch-monthly-forecast", {"force": False}),
+        ("POST",  "/api/admin/premium/dispatch-review-requests",  {"dry_run": True}),
+    ]
+    for method, path, body in locked_endpoints:
+        if method == "GET":
+            r = await ac.get(path, headers=SEO_HEADERS)
+        else:
+            r = await ac.post(path, headers=SEO_HEADERS, json=body or {})
+        assert r.status_code == 401, f"{method} {path} accepted SEO token (got {r.status_code})"
+
+
+async def test_invalid_token_rejected_everywhere(client):
+    ac, _ = client
+    bad = {"Authorization": "Bearer not-a-real-token"}
+    r1 = await ac.post("/api/admin/articles", headers=bad, json={
+        "title": "x", "excerpt": "yyyyyyyyyy", "content": ("x " * 200),
+        "author": "x", "category": "x",
+    })
+    assert r1.status_code == 401
+    r2 = await ac.get("/api/admin/subscribers", headers=bad)
+    assert r2.status_code == 401
+
+
+async def test_admin_token_still_works_on_relaxed_endpoints(client):
+    """Backwards-compat: ADMIN_SECRET must continue to work on the
+    article + indexing endpoints (we only widened, never narrowed)."""
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Admin Still Works",
+            "excerpt": "Admin token must still be honoured.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Admin",
+            "category": "Basics",
+            "status": "published",
+        },
+    )
+    assert r.status_code == 201

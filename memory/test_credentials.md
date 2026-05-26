@@ -21,6 +21,40 @@ This secret was rotated to a 48-char `secrets.token_urlsafe(36)` value on
 
 There is **no end-user authentication** in the app.
 
+## SEO_WORKFLOW_TOKEN (narrow-scope automation token)
+
+A second bearer token used by external SEO automation (Arvow, Claude Code,
+Blotato, n8n, etc.) so those workflows can publish articles + ping IndexNow
++ Google Indexing **without** having full reach over subscribers, billing,
+feedback moderation, or premium dispatches.
+
+- **Token** (in `/app/backend/.env` → `SEO_WORKFLOW_TOKEN`):
+  `Yd7GGGdxuBsQsGiH5AUYSaVyR42lbLh45UDohzcNlA9urGKY`
+- **Endpoints accepting this token** (alongside `ADMIN_SECRET`):
+  - `GET    /api/admin/articles`               (list)
+  - `GET    /api/admin/articles/{slug}`        (read draft)
+  - `POST   /api/admin/articles`               (create)
+  - `PATCH  /api/admin/articles/{slug}`        (update)
+  - `DELETE /api/admin/articles/{slug}`        (delete)
+  - `POST   /api/admin/seed-articles`          (initial seed)
+  - `POST   /api/admin/seed-seo-articles`      (5 long-form SEO seed)
+  - `POST   /api/admin/indexnow/submit`        (Bing/Yandex)
+  - `POST   /api/admin/google-indexing/submit` (Google)
+- **Endpoints that REJECT this token** (admin-only):
+  subscribers, feedback queue, contacts, stats, CSV exports, weekly dispatch,
+  monthly forecast dispatch, day-60 review-ask dispatch, compatibility send,
+  testimonial publish, subscriber actions, Stripe portal admin.
+
+Add the same value to your production env vars in the Emergent deploy
+dashboard so the same token works against `liveastrology.app`.
+
+Example curl (creates a published article through the workflow token):
+
+    curl -X POST https://liveastrology.app/api/admin/articles \
+      -H "Authorization: Bearer Yd7GGGdxuBsQsGiH5AUYSaVyR42lbLh45UDohzcNlA9urGKY" \
+      -H "Content-Type: application/json" \
+      -d '{"title":"…","excerpt":"…","content":"…","author":"Live Astrology","category":"…","status":"published"}'
+
 ## Resend (transactional email)
 
 - API key already set in `/app/backend/.env` (`RESEND_API_KEY`).
