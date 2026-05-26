@@ -85,6 +85,15 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2s · Static /rss.xml + Blog slug URLs + SC validation
+- ✅ **Static feeds at site root** — new Vite plugin `frontend/vite-plugins/generate-feeds.ts` runs at `buildStart`, fetches `/api/feed.xml` + `/api/atom.xml` from the production backend, and writes `public/rss.xml`, `public/feed.xml`, `public/atom.xml`. Vite then serves them as real XML at `https://liveastrology.app/rss.xml` (etc.) instead of the SPA's index.html. Build never blocks on a backend outage — falls back to the previously cached files.
+- ✅ Live verification: `/rss.xml`, `/feed.xml`, `/atom.xml` all return `application/xml` with 200 OK on preview after rebuild.
+- ✅ **Blog URLs migrated from numeric IDs to slugs** — `/blog/1` → `/blog/understanding-your-sun-sign-the-core-of-your-astrological-identity`. All 7 internal `navigate()` callers updated (`App.tsx` + `BlogPost.tsx`). `BlogDetailRoute` now detects legacy numeric IDs and emits a `<Navigate replace>` to the slug URL — old inbound links, social shares, Google's cached index all keep working. Sitemap entries rewritten to slug URLs.
+- ✅ Verified end-to-end via Playwright: visiting `/blog/1` lands on `/blog/understanding-your-sun-sign-...` with the correct post rendered.
+- ℹ️ **Search Console "itemReviewed"** — production HTML already has the field (3 occurrences confirmed via curl), but the screenshot in the user's Search Console shows "Last update: 5/24/26" which is BEFORE the fix went live. The user simply needs to click **VALIDATE FIX** in Search Console to re-trigger Google's crawl. No code change required.
+
+
+
 ### 2026-02-14 · Session 2r · Audit log + Search Console structured-data fix
 - ✅ **Review snippet fix** — added `itemReviewed` field (referencing the SoftwareApplication parent via `@id`) to all 3 homepage Review JSON-LD entries. Resolves the Google Search Console "Missing field itemReviewed" structured-data warning.
 - ✅ **`db.audit_log` collection** — new MongoDB collection capturing every article `create` / `update` / `delete` with `{action, slug, actor (admin|seo), status, details, created_at}`. `_record_audit` helper inserts the row inline after each successful write; failures are logged but never break the publish flow.
