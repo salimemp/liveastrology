@@ -1837,3 +1837,202 @@ async def test_flipping_draft_to_published_triggers_indexnow_ping(client, monkey
         "https://liveastrology.app/sitemap.xml",
     ]]
 
+
+
+# ---------- Google Indexing API ----------
+async def test_google_indexing_submit_requires_admin(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/google-indexing/submit",
+        json={"url": "https://liveastrology.app/"},
+    )
+    assert r.status_code == 401
+
+
+async def test_google_indexing_submit_skipped_when_disabled(client):
+    """With GOOGLE_INDEXING_DISABLED=1 (set by conftest), submit returns
+    skipped without authenticating or hitting Google."""
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/google-indexing/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"url": "https://liveastrology.app/articles/foo"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "skipped"
+    assert body["reason"] == "GOOGLE_INDEXING_DISABLED=1"
+    assert body["url"] == "https://liveastrology.app/articles/foo"
+
+
+async def test_google_indexing_submit_rejects_invalid_action(client):
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/google-indexing/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"url": "https://liveastrology.app/", "action": "URL_FOO"},
+    )
+    assert r.status_code == 422
+
+
+async def test_google_indexing_submit_rejects_non_absolute_url(client, monkeypatch):
+    """Relative URLs are caught before any network/auth attempt."""
+    monkeypatch.setenv("GOOGLE_INDEXING_DISABLED", "0")
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/google-indexing/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"url": "/articles/foo"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "failed"
+    assert "absolute" in body["reason"]
+
+
+async def test_google_indexing_submit_posts_with_bearer_when_enabled(client, monkeypatch):
+    """When enabled, submit gets a token + POSTs the correct JSON body."""
+    monkeypatch.setenv("GOOGLE_INDEXING_DISABLED", "0")
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        text = '{"urlNotificationMetadata":{}}'
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResp()
+
+    import google_indexing
+    monkeypatch.setattr(google_indexing.httpx, "AsyncClient", _FakeClient)
+
+    async def fake_token():
+        return "fake-access-token-xyz"
+
+    monkeypatch.setattr(google_indexing, "_get_access_token", fake_token)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/google-indexing/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"url": "https://liveastrology.app/articles/foo", "action": "URL_UPDATED"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["http_status"] == 200
+    assert body["url"] == "https://liveastrology.app/articles/foo"
+
+    assert captured["url"] == "https://indexing.googleapis.com/v3/urlNotifications:publish"
+    assert captured["json"] == {
+        "url": "https://liveastrology.app/articles/foo",
+        "type": "URL_UPDATED",
+    }
+    assert captured["headers"]["Authorization"] == "Bearer fake-access-token-xyz"
+
+
+async def test_google_indexing_submit_returns_failed_on_403(client, monkeypatch):
+    """403 from Google (most common = service account isn't a verified
+    Search Console owner) must surface as failed, not raise."""
+    monkeypatch.setenv("GOOGLE_INDEXING_DISABLED", "0")
+
+    class _FakeResp:
+        status_code = 403
+        text = '{"error":{"code":403,"message":"Permission denied. Failed to verify the URL ownership."}}'
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None): return _FakeResp()
+
+    import google_indexing
+    monkeypatch.setattr(google_indexing.httpx, "AsyncClient", _FakeClient)
+
+    async def fake_token(): return "tok"
+    monkeypatch.setattr(google_indexing, "_get_access_token", fake_token)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/google-indexing/submit",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={"url": "https://liveastrology.app/"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["http_status"] == 403
+    assert "Permission denied" in body["body"]
+
+
+async def test_publishing_article_also_pings_google_indexing(client, monkeypatch):
+    """Creating a published article schedules a background Google ping
+    in addition to the IndexNow one."""
+    google_calls: list[str] = []
+
+    import google_indexing as gi
+    import indexnow
+
+    async def fake_google_bg(url, *, action="URL_UPDATED"):
+        google_calls.append(url)
+
+    async def fake_indexnow_bg(urls):
+        pass
+
+    monkeypatch.setattr(gi, "submit_in_background", fake_google_bg)
+    monkeypatch.setattr(indexnow, "submit_in_background", fake_indexnow_bg)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Google Ping Demo",
+            "excerpt": "A short summary.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Editor",
+            "category": "Basics",
+            "status": "published",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert google_calls == ["https://liveastrology.app/articles/google-ping-demo"]
+
+
+async def test_drafts_do_not_trigger_google_indexing(client, monkeypatch):
+    google_calls: list[str] = []
+
+    import google_indexing as gi
+    import indexnow
+
+    async def fake_google_bg(url, *, action="URL_UPDATED"):
+        google_calls.append(url)
+
+    async def fake_indexnow_bg(urls):
+        pass
+
+    monkeypatch.setattr(gi, "submit_in_background", fake_google_bg)
+    monkeypatch.setattr(indexnow, "submit_in_background", fake_indexnow_bg)
+
+    ac, _ = client
+    r = await ac.post(
+        "/api/admin/articles",
+        headers={"Authorization": "Bearer test-admin-secret"},
+        json={
+            "title": "Draft No Ping",
+            "excerpt": "Draft article excerpt for testing.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Editor",
+            "category": "Basics",
+            "status": "draft",
+        },
+    )
+    assert r.status_code == 201
+    assert google_calls == []

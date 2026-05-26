@@ -85,6 +85,16 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2p · Google Indexing API (alongside IndexNow)
+- ✅ **`backend/google_indexing.py`** — async-friendly Google Indexing API client. Loads service-account JSON, caches OAuth token + expiry on a module-level Credentials object, refreshes via `asyncio.to_thread` so the event loop stays unblocked, posts `URL_UPDATED`/`URL_DELETED` payloads via `httpx.AsyncClient`. Never raises.
+- ✅ **`POST /api/admin/google-indexing/submit`** — admin-only manual submit for single URLs (`URL_UPDATED` or `URL_DELETED`).
+- ✅ **Auto-ping on publish** — `POST /api/admin/articles` and `PATCH` flipping draft → published now fan out to both IndexNow (Bing/Yandex/Seznam/Naver) AND Google Indexing in the same fire-and-forget hook.
+- ✅ Service-account JSON stored at `/app/backend/secrets/` (gitignored). `GOOGLE_INDEXING_CREDENTIALS_FILE` env var points there.
+- ✅ Test suite: **99 unit tests green** (91 prior + 8 new: auth, disabled, invalid-action, non-absolute URL, real round-trip with mocked httpx, 403 ownership error path, publish auto-ping, draft non-pinging).
+- 🔁 Live verification: returns HTTP 403 `Permission denied. Failed to verify the URL ownership` — *expected* until the service account `live-astrology@live-astrology-01.iam.gserviceaccount.com` is added as a verified Owner of `liveastrology.app` in Search Console. Once that one-time manual step is done, will flip to HTTP 200.
+
+
+
 ### 2026-02-14 · Session 2o · IndexNow auto-pings (Bing/Yandex instant indexing)
 - ✅ **`backend/indexnow.py`** — fire-and-forget pings to `https://api.indexnow.org/IndexNow` (Bing + Yandex + Seznam + Naver). Reads key from `INDEXNOW_KEY` env var. All failures logged + returned in the response shape but never raise.
 - ✅ **`GET /api/indexnow-key.txt`** — serves the key as plain text for search-engine ownership verification (via `keyLocation` in the payload).
