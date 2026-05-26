@@ -2163,3 +2163,136 @@ async def test_admin_token_still_works_on_relaxed_endpoints(client):
         },
     )
     assert r.status_code == 201
+
+
+# ---------- Audit log ----------
+ADMIN_HEADERS = {"Authorization": "Bearer test-admin-secret"}
+
+
+async def test_audit_log_records_create_with_actor(client):
+    """Creating an article via the SEO token must record actor='seo'."""
+    ac, mock_db = client
+    await ac.post(
+        "/api/admin/articles",
+        headers=SEO_HEADERS,
+        json={
+            "title": "Audit Create Demo",
+            "excerpt": "First audit log entry from automation.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Automation",
+            "category": "Basics",
+            "status": "published",
+        },
+    )
+    rows = [r async for r in mock_db.audit_log.find({}, {"_id": 0})]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["action"] == "create"
+    assert row["slug"] == "audit-create-demo"
+    assert row["actor"] == "seo"
+    assert row["status"] == "published"
+    assert row["details"]["title"] == "Audit Create Demo"
+    assert row["details"]["word_count"] >= 100
+
+
+async def test_audit_log_records_update_and_delete(client):
+    """PATCH and DELETE both append rows with the right action label."""
+    ac, mock_db = client
+    await ac.post("/api/admin/articles", headers=ADMIN_HEADERS, json={
+        "title": "Edit Then Delete",
+        "excerpt": "Will be edited then deleted.",
+        "content": ("Plain English sentence. " * 60).strip(),
+        "author": "Admin",
+        "category": "Basics",
+        "status": "draft",
+    })
+    await ac.patch(
+        "/api/admin/articles/edit-then-delete",
+        headers=ADMIN_HEADERS,
+        json={"status": "published"},
+    )
+    await ac.delete("/api/admin/articles/edit-then-delete", headers=ADMIN_HEADERS)
+
+    rows = [r async for r in mock_db.audit_log.find({}, {"_id": 0})]
+    actions = [r["action"] for r in rows]
+    assert actions == ["create", "update", "delete"]
+    assert all(r["actor"] == "admin" for r in rows)
+    update_row = next(r for r in rows if r["action"] == "update")
+    assert update_row["details"]["newly_published"] is True
+    assert "status" in update_row["details"]["fields_changed"]
+
+
+async def test_audit_log_endpoint_requires_admin(client):
+    """GET /api/admin/audit-log must reject the SEO token."""
+    ac, _ = client
+    r = await ac.get("/api/admin/audit-log", headers=SEO_HEADERS)
+    assert r.status_code == 401
+
+    r2 = await ac.get("/api/admin/audit-log")
+    assert r2.status_code == 401
+
+
+async def test_audit_log_endpoint_returns_newest_first_with_filters(client):
+    ac, _ = client
+    # Seed: 2 creates by SEO, 1 by admin
+    for i in range(2):
+        await ac.post("/api/admin/articles", headers=SEO_HEADERS, json={
+            "title": f"SEO Article {i}",
+            "excerpt": f"SEO post number {i}.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Automation",
+            "category": "Basics",
+            "status": "published",
+        })
+    await ac.post("/api/admin/articles", headers=ADMIN_HEADERS, json={
+        "title": "Admin Article 1",
+        "excerpt": "Admin-authored post.",
+        "content": ("Plain English sentence. " * 60).strip(),
+        "author": "Admin",
+        "category": "Basics",
+        "status": "published",
+    })
+
+    # No filter — all 3
+    r = await ac.get("/api/admin/audit-log", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3
+    assert body["count"] == 3
+    # Newest first
+    assert body["items"][0]["slug"] == "admin-article-1"
+
+    # Filter by actor=seo
+    r2 = await ac.get("/api/admin/audit-log?actor=seo", headers=ADMIN_HEADERS)
+    body2 = r2.json()
+    assert body2["total"] == 2
+    assert all(it["actor"] == "seo" for it in body2["items"])
+
+    # Filter by action=create
+    r3 = await ac.get("/api/admin/audit-log?action=create", headers=ADMIN_HEADERS)
+    assert r3.json()["total"] == 3
+
+    # Filter by slug
+    r4 = await ac.get("/api/admin/audit-log?slug=seo-article-0", headers=ADMIN_HEADERS)
+    body4 = r4.json()
+    assert body4["total"] == 1
+    assert body4["items"][0]["slug"] == "seo-article-0"
+
+
+async def test_audit_log_pagination(client):
+    ac, _ = client
+    for i in range(5):
+        await ac.post("/api/admin/articles", headers=ADMIN_HEADERS, json={
+            "title": f"Page Test {i}",
+            "excerpt": f"Pagination test number {i}.",
+            "content": ("Plain English sentence. " * 60).strip(),
+            "author": "Admin",
+            "category": "Basics",
+            "status": "published",
+        })
+    r = await ac.get("/api/admin/audit-log?limit=2&skip=0", headers=ADMIN_HEADERS)
+    body = r.json()
+    assert body["total"] == 5
+    assert body["count"] == 2
+    assert body["limit"] == 2
+    assert body["skip"] == 0

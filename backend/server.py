@@ -130,30 +130,40 @@ async def _shutdown() -> None:
     scheduler_module.stop_scheduler()
 
 
-def require_admin(authorization: str = Header(default="")) -> None:
-    """Shared-secret bearer auth for admin-only endpoints."""
+def require_admin(authorization: str = Header(default="")) -> str:
+    """Shared-secret bearer auth for admin-only endpoints.
+
+    Returns the token type (``"admin"``) on success — useful when the
+    dependency is consumed as a value via ``Depends(require_admin)``.
+    """
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="ADMIN_SECRET is not configured")
     expected = f"Bearer {ADMIN_SECRET}"
     if authorization != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    return "admin"
 
 
-def require_seo_or_admin(authorization: str = Header(default="")) -> None:
+def require_seo_or_admin(authorization: str = Header(default="")) -> str:
     """Accepts EITHER ``ADMIN_SECRET`` or ``SEO_WORKFLOW_TOKEN``.
 
     Used to gate the article-CMS + indexing endpoints so external SEO
     automation (Arvow / Blotato / Claude Code) can publish without being
     granted full admin reach over subscribers, billing, etc.
+
+    Returns ``"admin"`` or ``"seo"`` depending on which token authenticated
+    the caller — consumed by the audit-log helper to attribute writes.
     """
     if not ADMIN_SECRET and not SEO_WORKFLOW_TOKEN:
         raise HTTPException(
             status_code=503,
             detail="Neither ADMIN_SECRET nor SEO_WORKFLOW_TOKEN is configured",
         )
-    valid_tokens = {f"Bearer {t}" for t in (ADMIN_SECRET, SEO_WORKFLOW_TOKEN) if t}
-    if authorization not in valid_tokens:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if ADMIN_SECRET and authorization == f"Bearer {ADMIN_SECRET}":
+        return "admin"
+    if SEO_WORKFLOW_TOKEN and authorization == f"Bearer {SEO_WORKFLOW_TOKEN}":
+        return "seo"
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ---------- Utilities ----------
@@ -1445,8 +1455,38 @@ async def get_article_admin(slug: str) -> dict[str, Any]:
     return doc
 
 
-@app.post("/api/admin/articles", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_seo_or_admin)])
-async def create_article(payload: ArticleIn) -> dict[str, Any]:
+async def _record_audit(
+    *,
+    action: str,
+    slug: str,
+    actor: str,
+    status_value: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Append a single row to the ``audit_log`` collection.
+
+    Used by the article-write endpoints to record who (admin vs seo)
+    did what to which slug, with a UTC timestamp. Failures are logged
+    but never raise — the audit log must not break the publish flow.
+    """
+    try:
+        await db.audit_log.insert_one({
+            "action": action,
+            "slug": slug,
+            "actor": actor,          # "admin" or "seo"
+            "status": status_value,  # the article status after the action
+            "details": details or {},
+            "created_at": _now(),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("audit_log insert failed: %s", exc)
+
+
+@app.post("/api/admin/articles", status_code=status.HTTP_201_CREATED)
+async def create_article(
+    payload: ArticleIn,
+    actor: str = Depends(require_seo_or_admin),
+) -> dict[str, Any]:
     base_slug = _slugify(payload.slug or payload.title)
     slug = base_slug
     n = 2
@@ -1459,6 +1499,13 @@ async def create_article(payload: ArticleIn) -> dict[str, Any]:
     for k in ("created_at", "updated_at", "published_at"):
         if isinstance(doc.get(k), datetime):
             doc[k] = doc[k].isoformat()
+    await _record_audit(
+        action="create",
+        slug=slug,
+        actor=actor,
+        status_value=doc.get("status"),
+        details={"title": doc.get("title"), "word_count": doc.get("word_count")},
+    )
     if doc.get("status") == "published":
         await indexnow_module.submit_in_background([
             indexnow_module.url_for_article(slug),
@@ -1470,8 +1517,12 @@ async def create_article(payload: ArticleIn) -> dict[str, Any]:
     return doc
 
 
-@app.patch("/api/admin/articles/{slug}", dependencies=[Depends(require_seo_or_admin)])
-async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
+@app.patch("/api/admin/articles/{slug}")
+async def update_article(
+    slug: str,
+    patch: ArticleUpdate,
+    actor: str = Depends(require_seo_or_admin),
+) -> dict[str, Any]:
     existing = await db.articles.find_one({"slug": slug}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Article not found")
@@ -1501,6 +1552,16 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
     for k in ("created_at", "updated_at", "published_at"):
         if isinstance(doc.get(k), datetime):
             doc[k] = doc[k].isoformat()
+    await _record_audit(
+        action="update",
+        slug=slug,
+        actor=actor,
+        status_value=doc.get("status"),
+        details={
+            "fields_changed": [k for k in update_fields if k != "updated_at"],
+            "newly_published": newly_published,
+        },
+    )
     # Re-ping IndexNow + Google when the article transitions into "published".
     if newly_published or (patch.content is not None and doc.get("status") == "published"):
         await indexnow_module.submit_in_background([
@@ -1513,12 +1574,64 @@ async def update_article(slug: str, patch: ArticleUpdate) -> dict[str, Any]:
     return doc
 
 
-@app.delete("/api/admin/articles/{slug}", dependencies=[Depends(require_seo_or_admin)])
-async def delete_article(slug: str) -> dict[str, Any]:
+@app.delete("/api/admin/articles/{slug}")
+async def delete_article(
+    slug: str,
+    actor: str = Depends(require_seo_or_admin),
+) -> dict[str, Any]:
     res = await db.articles.delete_one({"slug": slug})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Article not found")
+    await _record_audit(action="delete", slug=slug, actor=actor)
     return {"status": "deleted", "slug": slug}
+
+
+@app.get("/api/admin/audit-log", dependencies=[Depends(require_admin)])
+async def list_audit_log(
+    limit: int = 50,
+    skip: int = 0,
+    actor: str | None = None,
+    action: str | None = None,
+    slug: str | None = None,
+) -> dict[str, Any]:
+    """Forensic trail of every article create / update / delete, with the
+    token type used. Admin-only (the SEO token can't read its own usage).
+
+    Query params:
+      - ``limit``  (default 50, max 200)
+      - ``skip``   (default 0)
+      - ``actor``  "admin" or "seo" — filter by token type
+      - ``action`` "create" | "update" | "delete" — filter by action
+      - ``slug``   exact slug match
+    """
+    query: dict[str, Any] = {}
+    if actor:
+        query["actor"] = actor
+    if action:
+        query["action"] = action
+    if slug:
+        query["slug"] = slug
+
+    total = await db.audit_log.count_documents(query)
+    capped_limit = min(max(limit, 1), 200)
+    cursor = (
+        db.audit_log.find(query, {"_id": 0})
+        .sort("created_at", -1)
+        .skip(max(skip, 0))
+        .limit(capped_limit)
+    )
+    items = []
+    async for doc in cursor:
+        if isinstance(doc.get("created_at"), datetime):
+            doc["created_at"] = doc["created_at"].isoformat()
+        items.append(doc)
+    return {
+        "total": total,
+        "count": len(items),
+        "limit": capped_limit,
+        "skip": max(skip, 0),
+        "items": items,
+    }
 
 
 # ---------- Resend webhook ingestion ----------

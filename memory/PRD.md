@@ -85,6 +85,17 @@ never surface to the user (the API always responds 202).
 
 ## Implementation log
 
+### 2026-02-14 · Session 2r · Audit log + Search Console structured-data fix
+- ✅ **Review snippet fix** — added `itemReviewed` field (referencing the SoftwareApplication parent via `@id`) to all 3 homepage Review JSON-LD entries. Resolves the Google Search Console "Missing field itemReviewed" structured-data warning.
+- ✅ **`db.audit_log` collection** — new MongoDB collection capturing every article `create` / `update` / `delete` with `{action, slug, actor (admin|seo), status, details, created_at}`. `_record_audit` helper inserts the row inline after each successful write; failures are logged but never break the publish flow.
+- ✅ **`require_admin` and `require_seo_or_admin` now return the actor string** — used as a `Depends`-injected value in article-write endpoints so each row records exactly which token was used.
+- ✅ **`GET /api/admin/audit-log`** — admin-only forensic-trail endpoint. Newest-first, filterable by `actor`, `action`, `slug`, with `limit` (max 200) + `skip` pagination. Returns `{total, count, limit, skip, items}`.
+- ✅ Test suite: **110 unit tests green** (105 prior + 5 new: create logs actor=seo, update+delete log correctly, audit endpoint requires admin not SEO, filter+sort+pagination behaviour).
+- 🔁 Live verification: SEO token creates article → audit row appears with `actor:"seo"` → admin reads it → SEO token gets 401 on the read endpoint. ✅
+- ℹ️ Search Console "Page with redirect" warning is informational (http → https 301, expected). "Alternate page with proper canonical tag" is also informational — Google found `www.liveastrology.app/` returning 200 (same content) and is correctly canonicalising to the non-www version. To eliminate it entirely the user should configure a DNS/Cloudflare 301 redirect `www.liveastrology.app/*` → `liveastrology.app/*`.
+
+
+
 ### 2026-02-14 · Session 2q · Dedicated SEO_WORKFLOW_TOKEN (narrow-scope automation)
 - ✅ **`SEO_WORKFLOW_TOKEN` env var** — a second bearer token, separate from `ADMIN_SECRET`, that lets external SEO automation (Arvow / Claude Code / Blotato / n8n) publish articles + ping indexing engines without having full admin reach.
 - ✅ **New `require_seo_or_admin` dependency** in `server.py` — accepts EITHER token. Returns 503 if both env vars are unset, 401 on token mismatch.
